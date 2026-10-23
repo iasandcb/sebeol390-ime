@@ -93,6 +93,10 @@ public final class Session {
     private let lexicon: Lexicon
     private var keys: [KeyAtom] = []
     private var segments: [Segment] = []
+    /// Language at the start of the open word. A lone jungseong such as ㅠ
+    /// is typed as its QWERTY key and flips `mode`, but the word is still
+    /// the Korean word the user started.
+    private var wordMode: Language
     private var locked: Language?
     private var pendingUndo: Undo?
     /// Closed words, already inserted.
@@ -104,6 +108,7 @@ public final class Session {
         self.lexicon = lexicon
         self.autoSwitch = autoSwitch
         self.mode = mode
+        self.wordMode = mode
     }
 
     public func input(_ english: Character) -> SessionUpdate {
@@ -115,6 +120,7 @@ public final class Session {
             return finishWord(appending: atom.english)
         }
         pendingUndo = nil
+        if keys.isEmpty { wordMode = mode }
         let previous = segments
         keys.append(atom)
         let converted = recompute(wordFinal: false, previous: previous)
@@ -177,6 +183,7 @@ public final class Session {
         }
 
         mode = mode.flipped
+        wordMode = mode
         locked = nil
         return make(.none, marked: preedit, didAutoConvert: false)
     }
@@ -194,6 +201,7 @@ public final class Session {
     public func forceMode(_ language: Language) -> SessionUpdate {
         let update = commitDisplayed()
         mode = language
+        wordMode = language
         locked = nil
         return SessionUpdate(mode: mode, didAutoConvert: false, preedit: "", field: update.field)
     }
@@ -291,6 +299,37 @@ public final class Session {
             return false
         }
 
+        // "Open" is 9펴 and "Int" is 8서: a shifted digit plus a syllable.
+        // That shape must not outrank a capitalized English word. A pure
+        // digit run (OK → 95) is excluded and stays a number.
+        if prefersCapitalizedEnglish() {
+            let english = [Segment(start: 0, end: keys.count, lang: .english)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(english) != render(extended)
+            }
+            segments = english
+            mode = .english
+            return changed
+        }
+
+        // "ktx는" is two legal syllables (걱는), so Hangul stickiness would
+        // swallow the acronym. A short acronym plus a particle splits first.
+        // "한은" stays Hangul: 한 starts a real dictionary word.
+        if let headEnd = acronymParticleSplit() {
+            let parts = [
+                Segment(start: 0, end: headEnd, lang: .english),
+                Segment(start: headEnd, end: keys.count, lang: .korean),
+            ]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(parts) != render(extended)
+            }
+            segments = parts
+            mode = .korean
+            return changed
+        }
+
         // A later syllable's keys can spell an English word ("력" is y-e-x,
         // and "yex" is a Webster headword). While the buffer is still one or
         // more syllables, optionally with a trailing choseong, it stays Korean.
@@ -308,6 +347,32 @@ public final class Session {
         // Shifted 390 digits sit on letter keys (1 is M, 0 is N). "MN" is an
         // English prefix, so it must not outrank the digits while typing Korean.
         if prefersPadDigits() {
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(korean) != render(extended)
+            }
+            segments = korean
+            mode = .korean
+            return changed
+        }
+
+        // "N.M" is the digit keys for 0.1. A dot must not turn that into an
+        // English token the way "agents.md" stays English.
+        if prefersShiftedNumber() {
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(korean) != render(extended)
+            }
+            segments = korean
+            mode = .korean
+            return changed
+        }
+
+        // ㅎㅎ, ㅋㅋ, ㅠㅠ, ㄱㅅ. The first ㅠ is only the key "5", so the
+        // mode flips, but the word was started in Korean.
+        if prefersBareJamoRun(previous) {
             let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
             var changed = false
             if let previous, let extended = extend(previous, to: keys.count) {
@@ -622,6 +687,144 @@ public final class Session {
         mode == .korean && !keys.isEmpty && keys.allSatisfy(isPadDigit)
     }
 
+    /// Particles and short endings that attach to a word with no space.
+    private static let particles: Set<String> = [
+        "는", "은", "이", "가", "를", "을", "에", "에서", "로", "으로",
+        "와", "과", "도", "만", "의", "하고", "했", "해", "하는",
+    ]
+
+    /// Index where an English acronym ends and a Hangul particle begins.
+    /// Nil when the buffer should stay one language.
+    private func acronymParticleSplit() -> Int? {
+        guard wordMode == .korean, keys.count >= 4 else { return nil }
+        let spelling = englishText(0..<keys.count).lowercased()
+        // Still typing "backfall" or "hello". A particle-shaped tail is a coincidence.
+        if lexicon.isEnglishWord(spelling) || lexicon.isEnglishPrefix(spelling) { return nil }
+        let whole = Composer.compose(keys)
+        if lexicon.isKoreanWord(whole.text) { return nil }
+        let limit = min(6, keys.count - 1)
+        guard limit >= 3 else { return nil }
+        for headEnd in 3...limit {
+            guard acronymHead(headEnd) else { continue }
+            let tail = Composer.compose(keys[headEnd..<keys.count])
+            guard Self.particles.contains(tail.text) else { continue }
+            guard case .clean = shape(of: tail.pieces) else { continue }
+            return headEnd
+        }
+        return nil
+    }
+
+    /// "api"/"url" are words. "ktx"/"mvp" are consonant runs that are not a
+    /// Hangul dictionary stem. "한" starts 한글, so it is not an acronym.
+    private func acronymHead(_ headEnd: Int) -> Bool {
+        let head = keys[0..<headEnd]
+        let spelling = englishText(0..<headEnd)
+        guard (3...6).contains(spelling.count), spelling.allSatisfy(\.isLetter) else { return false }
+        guard !head.allSatisfy(isPadDigit) else { return false }
+        let lower = spelling.lowercased()
+        if lexicon.isEnglishWord(lower) || lexicon.isAbbreviation(spelling) { return true }
+        if headReadsAsKorean(head) { return false }
+        return !lower.contains { "aeiou".contains($0) }
+    }
+
+    private func headReadsAsKorean(_ head: ArraySlice<KeyAtom>) -> Bool {
+        let composition = Composer.compose(head)
+        switch shape(of: composition.pieces) {
+        case .clean(let syllables) where syllables >= 2:
+            return true
+        case .clean(1):
+            let text = composition.text
+            return lexicon.isKoreanWord(text) || lexicon.isKoreanPrefix(text)
+        default:
+            return false
+        }
+    }
+
+    /// "Introduce" / "Open" / "Hello". The first shifted key is a digit or
+    /// symbol on 390, and it is put back once the spelling is English.
+    /// "OK" and "IO" are only digit keys, so they stay 95 and 89.
+    private func prefersCapitalizedEnglish() -> Bool {
+        let spelling = englishText(0..<keys.count)
+        guard spelling.count >= 2, spelling.allSatisfy(\.isLetter) else { return false }
+        guard keys.contains(where: isShiftedLetter) else { return false }
+        guard !keys.allSatisfy(isPadDigit) else { return false }
+        if lexicon.isAbbreviation(spelling) { return true }
+        let lower = spelling.lowercased()
+        return lexicon.isEnglishWord(lower) || lexicon.isEnglishPrefix(lower)
+    }
+
+    /// 0.1, 3.14, 1,000, 2026.10.23. The keys are shifted digits with '.'
+    /// or ',' between them. "OK." stays an abbreviation: a trailing
+    /// separator after a word is a period, not a decimal point.
+    private func prefersShiftedNumber() -> Bool {
+        guard !keys.isEmpty else { return false }
+        var digits = 0
+        var separators = 0
+        for atom in keys {
+            if isPadDigit(atom) {
+                digits += 1
+                continue
+            }
+            if atom.english == "." || atom.english == "," {
+                separators += 1
+                continue
+            }
+            return false
+        }
+        guard digits > 0, separators > 0 else { return false }
+        if let last = keys.last, last.english == "." || last.english == "," {
+            let body = keys.dropLast()
+            let onlyTrailing = !body.contains { $0.english == "." || $0.english == "," }
+            if onlyTrailing {
+                let letters = String(body.map(\.english))
+                let lower = letters.lowercased()
+                if lexicon.isAbbreviation(letters) || lexicon.isEnglishWord(lower) || lexicon.isEnglishPrefix(lower) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    /// Repeated bare jamo in a word that was started in Korean: ㅎㅎ, ㅋㅋ,
+    /// ㅠㅠ, ㅜㅜ, ㄱㅅ. An English word ("to", "know") and a prefix that was
+    /// already Latin ("th") are left alone. ㄲ·ㄸ·ㅃ are one choseong, not
+    /// this case.
+    private func prefersBareJamoRun(_ previous: [Segment]?) -> Bool {
+        guard wordMode == .korean else { return false }
+        let composition = Composer.compose(keys)
+        guard composition.pieces.count >= 2, composition.pieces.allSatisfy(isBarePiece) else { return false }
+        let spelling = englishText(0..<keys.count)
+        let lower = spelling.lowercased()
+        // "src/" is a path. The slash key is also ㅗ, so the pieces are bare jamo.
+        if spelling.contains(where: { CodeToken.interior.contains($0) }) { return false }
+        if lexicon.isEnglishWord(lower) || lexicon.isCodeToken(spelling) || lexicon.isAbbreviation(spelling) {
+            return false
+        }
+        if let previous, !previous.isEmpty, previous.allSatisfy({ $0.lang == .english }),
+           lexicon.isEnglishPrefix(lower) || lexicon.isEnglishWord(lower) {
+            return false
+        }
+        return true
+    }
+
+    private func isBarePiece(_ piece: CompositionPiece) -> Bool {
+        switch piece {
+        case .bareChoseong, .bareJungseong, .bareJongseong:
+            return true
+        case .syllable, .digit, .symbol:
+            return false
+        }
+    }
+
+    /// Shifted key whose 390 output is a digit or symbol, not a jamo.
+    /// "I" is 8, "H" is "'", "P" is ">".
+    private func isShiftedLetter(_ atom: KeyAtom) -> Bool {
+        guard atom.english.isLetter, atom.english.isUppercase else { return false }
+        if case .character = atom.korean { return true }
+        return false
+    }
+
     private func isPadDigit(_ atom: KeyAtom) -> Bool {
         if case .character(let character) = atom.korean {
             return character.isNumber
@@ -712,7 +915,13 @@ public final class Session {
         if marked.isEmpty {
             return (head + render(tail), "")
         }
-        return (head + peeled.stable, marked)
+        let stable = head + peeled.stable
+        // The particle is already a finished syllable. Committing it in the
+        // same replacement as the acronym avoids a second client call.
+        if Self.particles.contains(marked), !stable.isEmpty, stable.unicodeScalars.allSatisfy(\.isASCII) {
+            return (stable + marked, "")
+        }
+        return (stable, marked)
     }
 
     /// A 390 digit or symbol at the front of a Hangul segment was already
@@ -748,10 +957,32 @@ public final class Session {
     }
 
     private func emit(toPlain: String, toMarked: String, didAutoConvert: Bool) -> SessionUpdate {
-        let field = clientDiff(fromPlain: plain, fromMarked: preedit, toPlain: toPlain, toMarked: toMarked)
-        plain = toPlain
-        preedit = toMarked
-        return make(field, marked: toMarked, didAutoConvert: didAutoConvert)
+        var field = clientDiff(fromPlain: plain, fromMarked: preedit, toPlain: toPlain, toMarked: toMarked)
+        var nextPlain = toPlain
+        var nextMarked = toMarked
+        // insertThenMark and a rewrite that also marks are two client calls.
+        // The second call still sees the old caret and inserts the text again.
+        if field.sendsMoreThanOneEdit, marksAfterInsert(field) {
+            let span = utf16Length(plain) + utf16Length(preedit)
+            let text = toPlain + toMarked
+            field = .insertReplacing(utf16: span, text: text)
+            nextPlain = text
+            nextMarked = ""
+        }
+        plain = nextPlain
+        preedit = nextMarked
+        return make(field, marked: nextMarked, didAutoConvert: didAutoConvert)
+    }
+
+    private func marksAfterInsert(_ field: FieldEdit) -> Bool {
+        switch field {
+        case .insertThenMark, .insertReplacingThenMark:
+            return true
+        case .rewrite(_, _, let thenMark):
+            return !thenMark.isEmpty
+        default:
+            return false
+        }
     }
 
     private func clientDiff(fromPlain: String, fromMarked: String, toPlain: String, toMarked: String) -> FieldEdit {

@@ -342,6 +342,186 @@ private let lexicon: Lexicon = {
     #expect(paper.marked.isEmpty)
 }
 
+@Test func repeatedBareJamoStaysKorean() {
+    let jinjja = SebeolKeys.keys(for: "진짜")!
+    let joha = SebeolKeys.keys(for: "좋아")!
+    let samples = [
+        "mm": "ㅎㅎ",
+        "mmm": "ㅎㅎㅎ",
+        "00": "ㅋㅋ",
+        "0000": "ㅋㅋㅋㅋ",
+        "55": "ㅠㅠ",
+        "99": "ㅜㅜ",
+        "bb": "ㅜㅜ",
+        "uu": "ㄸ",
+        "jj": "ㅇㅇ",
+        "kn": "ㄱㅅ",
+        ";;": "ㅃ",
+        "j0": "ㅇㅋ",
+        "kk": "ㄲ",
+        "000 \(jinjja)": "ㅋㅋㅋ 진짜",
+        "\(joha)mm": "좋아ㅎㅎ",
+    ]
+    var failures: [String] = []
+    for (keys, expected) in samples {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        var typed = ""
+        for character in keys {
+            typed.append(character)
+            let update = session.input(character)
+            paper.apply(update.field)
+            if paper.text != expected.prefix(paper.text.count) && paper.text != session.document {
+                failures.append("\(keys) [\(typed)] paper=\(paper.text) doc=\(session.document) \(session.debugLine) \(update.field)")
+                break
+            }
+            if paper.text != session.document || paper.marked != session.preedit {
+                failures.append("어긋남 \(keys) [\(typed)] paper=\(paper.text) mark=\(paper.marked) doc=\(session.document) pre=\(session.preedit) \(update.field)")
+                break
+            }
+        }
+        if paper.text != expected || session.document != expected {
+            failures.append("끝 \(keys) paper=\(paper.text) doc=\(session.document) \(session.debugLine) /\(expected)")
+        }
+    }
+    for (keys, expected) in ["mm ": "ㅎㅎ ", "00 ": "ㅋㅋ ", "55 ": "ㅠㅠ ", "kn ": "ㄱㅅ "] {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        for character in keys {
+            let update = session.input(character)
+            if update.field.sendsMoreThanOneEdit {
+                failures.append("두 번 씀 \(keys) \(update.field)")
+            }
+            paper.apply(update.field)
+        }
+        if paper.text != expected || session.document != expected {
+            failures.append("끝 \(keys) paper=\(paper.text) doc=\(session.document) /\(expected)")
+        }
+    }
+    let report = failures.prefix(20).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func capitalizedEnglishReplacesLeadingShift() {
+    let words = ["Introduce", "Hello", "Please", "Kubernetes", "Open", "Yes", "My", "To", "TV"]
+    var failures: [String] = []
+    for word in words {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        var typed = ""
+        for character in word {
+            typed.append(character)
+            let update = session.input(character)
+            if update.field.sendsMoreThanOneEdit {
+                failures.append("두 번 씀 \(word) [\(typed)] \(update.field)")
+                break
+            }
+            paper.apply(update.field)
+            if paper.text != session.document || paper.marked != session.preedit {
+                failures.append("어긋남 \(word) [\(typed)] paper=\(paper.text) doc=\(session.document) \(update.field)")
+                break
+            }
+            if typed.count >= 2, paper.text != typed {
+                failures.append("\(word) [\(typed)] paper=\(paper.text) doc=\(session.document) \(session.debugLine)")
+                break
+            }
+        }
+        if paper.text != word || session.preedit.isEmpty == false {
+            failures.append("끝 \(word) paper=\(paper.text) pre=\(session.preedit)")
+        }
+    }
+    let report = failures.prefix(12).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func shiftedSeparatorsStayDigits() {
+    let korean = [
+        "N.M": "0.1",
+        ">.MJ": "3.14",
+        "M,NNN": "1,000",
+        "<N<L.MN.<>": "2026.10.23",
+        "MN": "10",
+        "Mkr": "1개",
+        "MN%": "10%",
+        "OK": "95",
+        "IO": "89",
+        "agents.md": "agents.md",
+        "x.com": "x.com",
+        "file.txt": "file.txt",
+    ]
+    var failures: [String] = []
+    for (keys, expected) in korean {
+        failures += clientFailures(keys, expected, mode: .korean)
+    }
+    failures += clientFailures("N.M", "0.1", mode: .english)
+    failures += clientFailures(">.MJ", "3.14", mode: .english)
+    failures += clientFailures("MN", "MN", mode: .english)
+    failures += clientFailures("OK", "OK", mode: .english)
+    failures += clientFailures("agents.md", "agents.md", mode: .english)
+    failures += clientFailures("x.com", "x.com", mode: .english)
+    let report = failures.prefix(16).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+private func clientFailures(_ keys: String, _ expected: String, mode: Language) -> [String] {
+    let session = Session(lexicon: lexicon, mode: mode)
+    var paper = Paper()
+    var typed = ""
+    var failures: [String] = []
+    for character in keys {
+        typed.append(character)
+        let update = session.input(character)
+        if update.field.sendsMoreThanOneEdit {
+            failures.append("두 번 씀 \(keys) [\(typed)] \(update.field)")
+            return failures
+        }
+        paper.apply(update.field)
+        if paper.text != session.document || paper.marked != session.preedit {
+            failures.append("어긋남 \(keys) [\(typed)] paper=\(paper.text) doc=\(session.document) \(update.field)")
+            return failures
+        }
+    }
+    if paper.text != expected || session.document != expected {
+        failures.append("\(mode) \(keys) paper=\(paper.text) doc=\(session.document) \(session.debugLine) /\(expected)")
+    }
+    return failures
+}
+
+@Test func acronymPlusParticle() {
+    let samples: [(String, String)] = [
+        ("ktx", "는"),
+        ("api", "를"),
+        ("url", "을"),
+        ("mvp", "가"),
+        ("sdk", "로"),
+        ("github", "에"),
+        ("html", "에서"),
+        ("cpu", "로"),
+    ]
+    var failures: [String] = []
+    for (head, particle) in samples {
+        guard let tail = SebeolKeys.keys(for: particle) else {
+            failures.append("키 없음 \(particle)")
+            continue
+        }
+        failures += clientFailures(head + tail, head + particle, mode: .korean)
+    }
+    for word in ["나는", "가는", "하는", "했는데", "입력", "한은", "집은"] {
+        guard let keys = SebeolKeys.keys(for: word) else {
+            failures.append("키 없음 \(word)")
+            continue
+        }
+        failures += clientFailures(keys, word, mode: .korean)
+    }
+    failures += clientFailures("hello", "hello", mode: .korean)
+    failures += clientFailures("other", "other", mode: .korean)
+    failures += clientFailures("Introduce", "Introduce", mode: .korean)
+    failures += clientFailures("agents.md", "agents.md", mode: .korean)
+    failures += clientFailures("mm", "ㅎㅎ", mode: .korean)
+    let report = failures.prefix(16).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
 @Test func eachKeyReachesTheClientOnce() {
     let samples = [
         "Mkr": "1개",

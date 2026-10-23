@@ -29,6 +29,17 @@ public final class Lexicon: @unchecked Sendable {
         korean.contains(word.precomposedStringWithCanonicalMapping)
     }
 
+    /// A longer dictionary word starts with this Hangul. "한" starts 한글.
+    /// "걱" does not start any word in the list.
+    public func isKoreanPrefix(_ text: String) -> Bool {
+        let key = text.precomposedStringWithCanonicalMapping
+        guard !key.isEmpty else { return false }
+        for word in korean where word.count > key.count && word.hasPrefix(key) {
+            return true
+        }
+        return false
+    }
+
     public func isAbbreviation(_ text: String) -> Bool {
         guard text.count >= 2, text.allSatisfy({ $0.isLetter && $0.isUppercase }) else { return false }
         return abbreviations.contains(text)

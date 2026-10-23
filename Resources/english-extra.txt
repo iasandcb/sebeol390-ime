@@ -91,6 +91,7 @@ aws
 gcp
 azure
 kubectl
+kubernetes
 terraform
 plist
 async
