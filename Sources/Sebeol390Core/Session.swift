@@ -47,6 +47,19 @@ public enum FieldEdit: Equatable, Sendable {
             return false
         }
     }
+
+    /// Two client calls in one key can insert the same characters twice,
+    /// because the second call still sees the selection from before the first.
+    var sendsMoreThanOneEdit: Bool {
+        switch self {
+        case .insertThenMark, .insertReplacingThenMark, .clearMarkThenInsert, .clearMarkThenMark:
+            return true
+        case .rewrite(_, _, let thenMark):
+            return !thenMark.isEmpty
+        default:
+            return false
+        }
+    }
 }
 
 public struct SessionUpdate: Equatable, Sendable {
@@ -232,7 +245,8 @@ public final class Session {
             let rest = plain.isEmpty ? word : String(word.dropFirst(plain.count))
             return .insert(rest + String(breaker))
         }
-        return .clearMarkThenInsert(utf16: utf16Length(plain), text: suffix)
+        let span = utf16Length(plain) + utf16Length(preedit)
+        return .insertReplacing(utf16: span, text: suffix)
     }
 
     private func clearToken() {
@@ -671,14 +685,54 @@ public final class Session {
         return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: didAutoConvert)
     }
 
-    /// English, digits, and symbols are inserted. The trailing Hangul
-    /// composition stays marked so the syllable can still grow.
+    /// English, digits, and symbols are inserted once. The trailing Hangul,
+    /// including every composing segment of the current syllable, stays one
+    /// marked range so the next key replaces that range instead of inserting
+    /// the same characters again. Digits that share a segment with a syllable
+    /// ("1개") stay inserted; only the syllable is marked.
     private func clientSplit() -> (plain: String, marked: String) {
-        guard let last = segments.last else { return ("", "") }
-        if last.lang == .korean, segmentComposes(last) {
-            return (render(Array(segments.dropLast())), render([last]))
+        guard !segments.isEmpty else { return ("", "") }
+        var splitAt = segments.count
+        while splitAt > 0 {
+            let segment = segments[splitAt - 1]
+            if segment.lang == .korean, segmentComposes(segment) {
+                splitAt -= 1
+            } else {
+                break
+            }
         }
-        return (render(segments), "")
+        let head = render(Array(segments[..<splitAt]))
+        let tail = Array(segments[splitAt...])
+        guard let first = tail.first else { return (head, "") }
+        let peeled = peelDigitsAndSymbols(first)
+        var marked = peeled.open
+        if tail.count > 1 {
+            marked += render(Array(tail.dropFirst()))
+        }
+        if marked.isEmpty {
+            return (head + render(tail), "")
+        }
+        return (head + peeled.stable, marked)
+    }
+
+    /// A 390 digit or symbol at the front of a Hangul segment was already
+    /// inserted. Putting it inside the new marked text types it a second time.
+    private func peelDigitsAndSymbols(_ segment: Segment) -> (stable: String, open: String) {
+        let composition = Composer.compose(keys[segment.start..<segment.end])
+        let chars = Array(composition.text)
+        guard chars.count == composition.pieces.count else {
+            return ("", composition.text)
+        }
+        var index = 0
+        for piece in composition.pieces {
+            switch piece {
+            case .digit, .symbol:
+                index += 1
+            case .syllable, .bareChoseong, .bareJungseong, .bareJongseong:
+                return (String(chars[..<index]), String(chars[index...]))
+            }
+        }
+        return (composition.text, "")
     }
 
     private func segmentComposes(_ segment: Segment) -> Bool {
@@ -729,7 +783,13 @@ public final class Session {
         if fromPlain.hasPrefix(toPlain) {
             let removed = utf16Length(String(fromPlain.dropFirst(toPlain.count)))
             if removed == 0 { return .mark(toMarked) }
-            return .clearMarkThenMark(utf16: removed, text: toMarked)
+            // One range covers the committed tail and the live mark. A second
+            // call would still see the old caret and insert the tail again.
+            let span = removed + utf16Length(fromMarked)
+            if toMarked.isEmpty {
+                return .insertReplacing(utf16: span, text: "")
+            }
+            return .replaceBeforeCaret(utf16: span, text: toMarked)
         }
         let span = utf16Length(fromPlain) + utf16Length(fromMarked)
         return .rewrite(utf16: span, text: toPlain, thenMark: toMarked)

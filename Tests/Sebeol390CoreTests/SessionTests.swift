@@ -342,6 +342,85 @@ private let lexicon: Lexicon = {
     #expect(paper.marked.isEmpty)
 }
 
+@Test func eachKeyReachesTheClientOnce() {
+    let samples = [
+        "Mkr": "1개",
+        ">nd": "3시",
+        "MNkr": "10개",
+        "<N<Lhes": "2026년",
+        "x ifs": "x 만",
+        "deploymr2hgsuc": "deploy했는데",
+        "AIyv": "AI로",
+        "MN%": "10%",
+        ">.MJ": "3.14",
+        "jd3yex": "입력",
+        "agents.md": "agents.md",
+        "hello": "hello",
+        "v2": "v2",
+    ]
+    var failures: [String] = []
+    for (keys, expected) in samples {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        var typed = ""
+        for character in keys {
+            typed.append(character)
+            let update = session.input(character)
+            if update.field.sendsMoreThanOneEdit {
+                failures.append("두 번 씀 \(keys) [\(typed)] \(update.field)")
+                break
+            }
+            paper.apply(update.field)
+            if paper.text != session.document || paper.marked != session.preedit {
+                failures.append("\(keys) [\(typed)] paper=\(paper.text) mark=\(paper.marked) doc=\(session.document) pre=\(session.preedit) \(update.field)")
+                break
+            }
+        }
+        if paper.text != expected || session.document != expected {
+            failures.append("끝 \(keys) paper=\(paper.text) doc=\(session.document) /\(expected)")
+        }
+        let stopped = session.commitDisplayed()
+        paper.apply(stopped.field)
+        if !stopped.field.preservesCharacters || paper.text != expected {
+            failures.append("멈춤 \(keys) paper=\(paper.text) \(stopped.field)")
+        }
+        if paper.text != session.document {
+            failures.append("멈춤 불일치 \(keys) paper=\(paper.text) doc=\(session.document)")
+        }
+    }
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Resources/korean-words.txt")
+    let words = (try! String(contentsOf: root, encoding: .utf8))
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") && $0.allSatisfy(isModernSyllable) && $0.count >= 2 }
+    for word in words {
+        guard let keys = SebeolKeys.keys(for: word) else { continue }
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        for character in keys {
+            let update = session.input(character)
+            if update.field.sendsMoreThanOneEdit {
+                failures.append("두 번 씀 \(word) \(update.field)")
+                break
+            }
+            paper.apply(update.field)
+            if paper.text != session.document {
+                failures.append("\(word) paper=\(paper.text) doc=\(session.document) \(update.field)")
+                break
+            }
+        }
+        if session.document != word || paper.text != word {
+            failures.append("끝 \(word) paper=\(paper.text) doc=\(session.document)")
+        }
+    }
+    let report = failures.prefix(20).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
 @Test func fieldEditsMatchTheDocument() {
     let samples = [
         "x ifs",
@@ -620,23 +699,24 @@ private struct Paper {
         case .mark(let string):
             marked = string
         case .replaceBeforeCaret(let utf16, let string):
-            committed = dropEnd(committed, utf16)
+            removeBeforeCaret(utf16)
             marked = string
         case .insertThenMark(let insert, let mark):
             committed += insert
             marked = mark
         case .insertReplacing(let utf16, let string):
-            committed = dropEnd(committed, utf16) + string
+            removeBeforeCaret(utf16)
+            committed += string
             marked = ""
         case .insertReplacingThenMark(let utf16, let insert, let mark):
             committed = dropEnd(committed, utf16) + insert
             marked = mark
         case .clearMarkThenInsert(let utf16, let string):
+            removeBeforeCaret(utf16 + utf16Count(marked))
+            committed += string
             marked = ""
-            committed = dropEnd(committed, utf16) + string
         case .clearMarkThenMark(let utf16, let string):
-            marked = ""
-            committed = dropEnd(committed, utf16)
+            removeBeforeCaret(utf16 + utf16Count(marked))
             marked = string
         case .rewrite(let utf16, let string, let thenMark):
             var left = utf16
@@ -659,6 +739,17 @@ private struct Paper {
             committed = dropEnd(committed, 1)
         } else {
             marked = dropEnd(marked, 1)
+        }
+    }
+
+    /// `utf16` is counted back from the caret, through the mark and then the
+    /// committed text. One client call replaces that span.
+    private mutating func removeBeforeCaret(_ utf16: Int) {
+        let fromMark = min(utf16, utf16Count(marked))
+        marked = dropEnd(marked, fromMark)
+        let fromCommitted = utf16 - fromMark
+        if fromCommitted > 0 {
+            committed = dropEnd(committed, fromCommitted)
         }
     }
 }

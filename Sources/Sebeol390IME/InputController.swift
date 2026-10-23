@@ -141,11 +141,11 @@ final class SebeolInputController: IMKInputController {
             client.insertText(insert, replacementRange: rangeBeforeCaret(utf16, client: client))
             setMarked(mark, replacement: notFound, client: client)
         case .clearMarkThenInsert(let utf16, let text):
-            setMarked("", replacement: notFound, client: client)
-            client.insertText(text, replacementRange: rangeBeforeCaret(utf16, client: client))
+            let span = utf16 + markedLength(client)
+            client.insertText(text, replacementRange: rangeBeforeCaret(span, client: client))
         case .clearMarkThenMark(let utf16, let text):
-            setMarked("", replacement: notFound, client: client)
-            setMarked(text, replacement: rangeBeforeCaret(utf16, client: client), client: client)
+            let span = utf16 + markedLength(client)
+            setMarked(text, replacement: rangeBeforeCaret(span, client: client), client: client)
         case .rewrite(let utf16, let text, let thenMark):
             let range = rangeBeforeCaret(utf16, client: client)
             if thenMark.isEmpty {
@@ -166,6 +166,12 @@ final class SebeolInputController: IMKInputController {
             selectionRange: NSRange(location: end, length: 0),
             replacementRange: replacement
         )
+    }
+
+    private func markedLength(_ client: IMKTextInput) -> Int {
+        let range = client.markedRange()
+        if range.location == NSNotFound { return 0 }
+        return range.length
     }
 
     private func rangeBeforeCaret(_ utf16: Int, client: IMKTextInput) -> NSRange {
