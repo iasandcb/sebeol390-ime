@@ -443,6 +443,12 @@ public final class Session {
         case .symbol:
             return ReadingQuality(score: 14, solid: false)
         case .singleBare:
+            // A choseong, including ㄲ·ㄸ·ㅃ, can still open a syllable.
+            // A lone jungseong or jongseong cannot ("x" is ㄱ). A finished
+            // word that never became a syllable is not Korean either ("k ").
+            if wordFinal || composition.pieces != [.bareChoseong] {
+                return nil
+            }
             return ReadingQuality(score: 26, solid: false)
         case .trailing(let syllables):
             return ReadingQuality(score: 34 + syllables * 8, solid: false)

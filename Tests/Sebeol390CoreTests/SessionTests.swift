@@ -164,6 +164,26 @@ private let lexicon: Lexicon = {
     assertTypes("mrnt", "해서")
 }
 
+@Test func loneJamoDoesNotReplaceEnglish() {
+    // x and a are jongseong. They must stay letters, including after a Korean word.
+    assertTypes("x ifs", "x 만")
+    assertTypes("a ifs", "a 만")
+    assertTypes("x ", "x ")
+    assertTypes("a ", "a ")
+    assertTypes("i ", "i ")
+    assertTypes("k ", "k ")
+    assertTypes("v2", "v2")
+    let session = Session(lexicon: lexicon, mode: .korean)
+    _ = session.input("k")
+    #expect(session.preedit == "ㄱ")
+    _ = session.input("f")
+    #expect(session.preedit == "가")
+    _ = session.input(" ")
+    #expect(session.document == "가 ")
+    _ = session.input("x")
+    #expect(session.preedit == "x", "\(session.debugLine)")
+}
+
 @Test func englishWordsStayEnglish() {
     assertTypes("deploy", "deploy")
     assertTypes("hello", "hello")
