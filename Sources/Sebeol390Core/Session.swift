@@ -210,6 +210,19 @@ public final class Session {
             return changed
         }
 
+        // Shifted 390 digits sit on letter keys (1 is M, 0 is N). "MN" is an
+        // English prefix, so it must not outrank the digits while typing Korean.
+        if prefersPadDigits() {
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(korean) != render(extended)
+            }
+            segments = korean
+            mode = .korean
+            return changed
+        }
+
         // "agents.md" and "https://agents.md" are one token. A dot only ends
         // the word when the buffer is already a Hangul syllable.
         if prefersWholeEnglishCode() {
@@ -350,6 +363,11 @@ public final class Session {
     private func quality(_ range: Range<Int>, lang: Language, wordFinal: Bool) -> ReadingQuality? {
         switch lang {
         case .english:
+            // A run of nothing but 390 digit keys is not an English word.
+            // "AI" still is: only the I key is a digit, and the abbreviation stands.
+            if mode == .korean, !keys[range].isEmpty, keys[range].allSatisfy(isPadDigit) {
+                return nil
+            }
             return englishQuality(englishText(range), wordFinal: wordFinal)
         case .korean:
             return koreanQuality(keys[range], wordFinal: wordFinal)
@@ -429,6 +447,9 @@ public final class Session {
         case .trailing(let syllables):
             return ReadingQuality(score: 34 + syllables * 8, solid: false)
         case .digits:
+            // English mode keeps the QWERTY letters (MN, API). Korean mode
+            // reads this same key run as digits.
+            if mode == .english { return nil }
             return ReadingQuality(score: 48 + composition.pieces.count * 6, solid: composition.pieces.count >= 2)
         case .clean(let syllables):
             var score = 100 + max(0, syllables - 1) * 24
@@ -488,10 +509,23 @@ public final class Session {
 
     /// The whole buffer is one English letter run: a word, or the start of one.
     /// Checked only after Hangul stickiness, so 입력 and 녀 stay Korean.
+    /// An all-digit pad run is handled first, so "MN" is not read as a prefix.
     private func prefersWholeEnglishWord() -> Bool {
         let lower = englishText(0..<keys.count).lowercased()
         guard lower.count >= 2, lower.allSatisfy(\.isLetter) else { return false }
         return lexicon.isEnglishWord(lower) || lexicon.isEnglishPrefix(lower)
+    }
+
+    /// Korean-mode run of shifted 390 digit keys (M N U I O J K L < >).
+    private func prefersPadDigits() -> Bool {
+        mode == .korean && !keys.isEmpty && keys.allSatisfy(isPadDigit)
+    }
+
+    private func isPadDigit(_ atom: KeyAtom) -> Bool {
+        if case .character(let character) = atom.korean {
+            return character.isNumber
+        }
+        return false
     }
 
     private func cleanSyllableCount(_ text: String) -> Int {

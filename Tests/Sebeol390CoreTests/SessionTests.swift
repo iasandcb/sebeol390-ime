@@ -295,8 +295,72 @@ private func sticksAsKorean(_ text: String) -> Bool {
     return body.allSatisfy { $0 == .syllable || $0 == .digit }
 }
 
-private func assertTypes(_ keys: String, _ expected: String) {
-    let session = Session(lexicon: lexicon, mode: .korean)
+@Test func padDigitsStayDigitsInKoreanMode() {
+    let pad = ["M": "1", "N": "0", "U": "7", "I": "8", "O": "9", "J": "4", "K": "5", "L": "6", "<": "2", ">": "3"]
+    var failures: [String] = []
+    for (key, digit) in pad {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        _ = session.input(key.first!)
+        if session.document != digit {
+            failures.append("\(key) → \(session.document)")
+        }
+    }
+    for (left, leftDigit) in pad {
+        for (right, rightDigit) in pad {
+            let keys = left + right
+            let session = Session(lexicon: lexicon, mode: .korean)
+            for character in keys {
+                _ = session.input(character)
+            }
+            let expected = leftDigit + rightDigit
+            if session.document != expected {
+                failures.append("\(keys) → \(session.document) / \(expected)")
+            }
+        }
+    }
+    let samples = [
+        "M": "1",
+        "MN": "10",
+        "MNN": "100",
+        "<N<L": "2026",
+        ">.MJ": "3.14",
+        "MN%": "10%",
+        "MNkr": "10개",
+        "<N<Lhes MNjbtw <>jdw": "2026년 10월 23일",
+        "IO": "89",
+        "OK": "95",
+        "UI": "78",
+        "ML": "16",
+    ]
+    for (keys, expected) in samples {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var typed = ""
+        for character in keys {
+            typed.append(character)
+            _ = session.input(character)
+            if session.document.contains(where: \.isUppercase) {
+                failures.append("대문자 \(typed) → \(session.document)")
+                break
+            }
+        }
+        if session.document != expected {
+            failures.append("\(keys) → \(session.document) / \(expected)")
+        }
+    }
+    let report = failures.prefix(40).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func englishModeKeepsAllCaps() {
+    assertTypes("MN", "MN", mode: .english)
+    assertTypes("API", "API", mode: .english)
+    assertTypes("TV", "TV", mode: .english)
+    assertTypes("OK", "OK", mode: .english)
+    assertTypes("TV", "TV")
+}
+
+private func assertTypes(_ keys: String, _ expected: String, mode: Language = .korean) {
+    let session = Session(lexicon: lexicon, mode: mode)
     var trace: [String] = []
     for character in keys {
         _ = session.input(character)
