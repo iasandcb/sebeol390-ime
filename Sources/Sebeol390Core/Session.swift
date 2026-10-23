@@ -52,7 +52,7 @@ public final class Session {
     }
 
     public func input(_ atom: KeyAtom) -> SessionUpdate {
-        if atom.isNeutralBreaker {
+        if atom.isNeutralBreaker && !continuesAsCode(atom) {
             return finishWord(appending: atom.english)
         }
         pendingUndo = nil
@@ -210,6 +210,33 @@ public final class Session {
             return changed
         }
 
+        // "agents.md" and "https://agents.md" are one token. A dot only ends
+        // the word when the buffer is already a Hangul syllable.
+        if prefersWholeEnglishCode() {
+            let english = [Segment(start: 0, end: keys.count, lang: .english)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(english) != render(extended)
+            }
+            segments = english
+            mode = .english
+            return changed
+        }
+
+        // "agents" is still a prefix of "agentship", and "nts" is the syllable
+        // 선. A pure letter run that is a word or a prefix stays one English
+        // reading. "AIyv" is not a prefix, so 로 can still take the tail.
+        if prefersWholeEnglishWord() {
+            let english = [Segment(start: 0, end: keys.count, lang: .english)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(english) != render(extended)
+            }
+            segments = english
+            mode = .english
+            return changed
+        }
+
         let chosen = bestPath(wordFinal: wordFinal) ?? [Segment(start: 0, end: keys.count, lang: mode)]
         if let previous, let extended = extend(previous, to: keys.count) {
             let extendedScore = score(extended, wordFinal: wordFinal)
@@ -317,10 +344,6 @@ public final class Session {
         guard lower.contains(where: { "aeiou".contains($0) }) else { return false }
         if lexicon.isEnglishWord(lower) { return false }
         guard lexicon.isEnglishPrefix(lower) else { return false }
-        // "deploy" + m is the start of a Korean syllable, even though
-        // "deploym" is also a prefix of "deployment".
-        let stem = String(lower.dropLast())
-        if stem.count >= 3, lexicon.isEnglishWord(stem) { return false }
         return lower.count >= 3 || mode == .english
     }
 
@@ -433,12 +456,67 @@ public final class Session {
     /// A reading that is not a syllable anymore ("hello", "other", "deploy")
     /// falls through and can switch.
     private func prefersWholeKorean() -> Bool {
-        switch shape(of: Composer.compose(keys).pieces) {
+        switch bufferShape() {
         case .clean(let syllables), .trailing(let syllables):
             return syllables >= 1
         default:
             return false
         }
+    }
+
+    /// Filenames, URLs, domains, paths, and emails are one English token.
+    /// Interior punctuation does not open a new language decision, so "md"
+    /// after a dot is not free to become the syllable 히.
+    private func prefersWholeEnglishCode() -> Bool {
+        let text = englishText(0..<keys.count)
+        guard text.contains(where: { CodeToken.interior.contains($0) }) else { return false }
+        guard text.allSatisfy({ $0.isLetter || $0.isNumber || CodeToken.interior.contains($0) }) else { return false }
+        let labels = text.split { CodeToken.interior.contains($0) }
+        guard !labels.isEmpty else { return false }
+        return labels.allSatisfy { labelStaysEnglish(String($0)) }
+    }
+
+    private func labelStaysEnglish(_ label: String) -> Bool {
+        let lower = label.lowercased()
+        // One syllable stays in the token: "md" is 히, and a file extension is
+        // the same shape. Two syllables are Korean unless they are a real
+        // English word. 요 sits on the 4 key, so a Hangul word must not be
+        // kept just because it looks like a version token.
+        guard cleanSyllableCount(label) >= 2 else { return true }
+        return lower.allSatisfy(\.isLetter) && lexicon.isEnglishWord(lower)
+    }
+
+    /// The whole buffer is one English letter run: a word, or the start of one.
+    /// Checked only after Hangul stickiness, so 입력 and 녀 stay Korean.
+    private func prefersWholeEnglishWord() -> Bool {
+        let lower = englishText(0..<keys.count).lowercased()
+        guard lower.count >= 2, lower.allSatisfy(\.isLetter) else { return false }
+        return lexicon.isEnglishWord(lower) || lexicon.isEnglishPrefix(lower)
+    }
+
+    private func cleanSyllableCount(_ text: String) -> Int {
+        let atoms = text.map { Layout390.atom(for: $0) }
+        if case .clean(let count) = shape(of: Composer.compose(atoms).pieces) {
+            return count
+        }
+        return 0
+    }
+
+    /// A period after Hangul commits the word. A period inside an English or
+    /// dotted token ("agents.md", "a.b.c", "https://…") stays in the preedit.
+    private func continuesAsCode(_ atom: KeyAtom) -> Bool {
+        guard autoSwitch, locked == nil, !keys.isEmpty else { return false }
+        guard CodeToken.joiners.contains(atom.english) else { return false }
+        if !segments.isEmpty, segments.allSatisfy({ $0.lang == .english }) {
+            return true
+        }
+        guard keys.count == 1, CodeToken.starters.contains(atom.english) else { return false }
+        if case .singleBare = bufferShape() { return true }
+        return false
+    }
+
+    private func bufferShape() -> Shape {
+        shape(of: Composer.compose(keys).pieces)
     }
 
     private func englishText(_ range: Range<Int>) -> String {
@@ -536,6 +614,15 @@ private func shape(of pieces: [CompositionPiece]) -> Shape {
         return syllables > 0 ? .trailing(syllables: syllables) : .invalid
     }
     return syllables > 0 ? .clean(syllables: syllables) : .invalid
+}
+
+private enum CodeToken {
+    /// Breakers that stay inside a filename, URL, email, or identifier.
+    static let joiners: Set<Character> = [".", ":", "@", "_", "-", "+", "?", "=", "&", "%", "#"]
+    /// A lone bare jamo plus one of these is a dotted label ("a.b"), not a word.
+    static let starters: Set<Character> = [".", ":", "@", "_", "-", "+"]
+    /// Same as joiners, plus "/" which is already inside the token (it is ㅗ on 390).
+    static let interior: Set<Character> = [".", ":", "/", "@", "_", "-", "+", "?", "=", "&", "%", "#"]
 }
 
 private enum Scoring {
