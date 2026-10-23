@@ -11,6 +11,44 @@ private let lexicon: Lexicon = {
     return try! Lexicon.load(from: root)
 }()
 
+@Test func ibryeokStaysKorean() {
+    // 력 is y e x, and "yex" is an English word. The syllable must not be stolen.
+    assertTypes("jd3yex", "입력")
+    assertTypes("jd3yex ", "입력 ")
+}
+
+@Test func commonKoreanWordsStayKoreanThroughEveryKey() {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Resources/korean-words.txt")
+    let words = (try! String(contentsOf: root, encoding: .utf8))
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") && $0.allSatisfy(isModernSyllable) && $0.count >= 2 }
+    var failures: [String] = []
+    for word in words {
+        guard let keys = SebeolKeys.keys(for: word) else {
+            failures.append("칠 수 없음 \(word)")
+            continue
+        }
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var typed = ""
+        for character in keys {
+            typed.append(character)
+            _ = session.input(character)
+            let korean = Composer.compose(typed.map { Layout390.atom(for: $0) }).text
+            if session.document != korean {
+                failures.append("\(word) [\(typed)] → \(session.document) / \(korean)")
+                break
+            }
+        }
+    }
+    let report = failures.prefix(40).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
 @Test func koreanSentencesStayKorean() {
     assertTypes("jfsheamfncj4", "안녕하세요")
     assertTypes("mfskgw", "한글")
@@ -100,6 +138,63 @@ private func assertTypes(_ keys: String, _ expected: String) {
         trace.append(session.debugLine)
     }
     #expect(session.document == expected, "\(trace.joined(separator: "\n"))")
+}
+
+private func isModernSyllable(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else { return false }
+    return (0xAC00...0xD7A3).contains(scalar.value)
+}
+
+/// 390 keystrokes for a Hangul word. A letter key wins over a digit that
+/// produces the same jamo, so the sweep hits the English-looking readings.
+private enum SebeolKeys {
+    static func keys(for word: String) -> String? {
+        var result = ""
+        for character in word {
+            guard let part = keys(for: character) else { return nil }
+            result += part
+        }
+        return result
+    }
+
+    static func keys(for syllable: Character) -> String? {
+        guard let scalar = syllable.unicodeScalars.first else { return nil }
+        let code = Int(scalar.value - 0xAC00)
+        let cho = UInt32(0x1100 + code / 588)
+        let jung = UInt32(0x1161 + (code % 588) / 28)
+        let jongIndex = code % 28
+        guard let choKeys = sequence(.choseong, cho), let jungKeys = sequence(.jungseong, jung) else { return nil }
+        var text = choKeys + jungKeys
+        if jongIndex != 0 {
+            guard let jongKeys = sequence(.jongseong, UInt32(0x11A8 + jongIndex - 1)) else { return nil }
+            text += jongKeys
+        }
+        return text
+    }
+
+    private static let byJamo: [Jamo: Character] = {
+        let probe = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`-=[]\\;',./~!@#$%^&*()_+{}|:\"<>?")
+        var map: [Jamo: Character] = [:]
+        for character in probe {
+            if case .jamo(let jamo) = Layout390.atom(for: character).korean, map[jamo] == nil {
+                map[jamo] = character
+            }
+        }
+        return map
+    }()
+
+    private static func sequence(_ kind: JamoKind, _ scalar: UInt32) -> String? {
+        let target = Jamo(scalar: scalar, kind: kind)
+        if let key = byJamo[target] { return String(key) }
+        for (first, firstKey) in byJamo where first.kind == kind {
+            for (second, secondKey) in byJamo where second.kind == kind {
+                if Hangul.merge(first, second) == target {
+                    return String(firstKey) + String(secondKey)
+                }
+            }
+        }
+        return nil
+    }
 }
 
 private extension Session {

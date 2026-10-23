@@ -196,6 +196,20 @@ public final class Session {
             return false
         }
 
+        // A later syllable's keys can spell an English word ("력" is y-e-x,
+        // and "yex" is a Webster headword). While the buffer is still one or
+        // more syllables, optionally with a trailing choseong, it stays Korean.
+        if prefersWholeKorean() {
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(korean) != render(extended)
+            }
+            segments = korean
+            mode = .korean
+            return changed
+        }
+
         let chosen = bestPath(wordFinal: wordFinal) ?? [Segment(start: 0, end: keys.count, lang: mode)]
         if let previous, let extended = extend(previous, to: keys.count) {
             let extendedScore = score(extended, wordFinal: wordFinal)
@@ -411,6 +425,20 @@ public final class Session {
         let head = Composer.compose(keys[from..<index])
         let full = Composer.compose(keys[from...index])
         return full.pieces.last == .syllable && full.text.count == head.text.count && full.text != head.text
+    }
+
+    /// The buffer is still a Korean word being typed: one or more syllables,
+    /// optionally with the first consonant of the next syllable. English words
+    /// made of those same keys ("yex", "ivy", "uvr2") do not get to interrupt it.
+    /// A reading that is not a syllable anymore ("hello", "other", "deploy")
+    /// falls through and can switch.
+    private func prefersWholeKorean() -> Bool {
+        switch shape(of: Composer.compose(keys).pieces) {
+        case .clean(let syllables), .trailing(let syllables):
+            return syllables >= 1
+        default:
+            return false
+        }
     }
 
     private func englishText(_ range: Range<Int>) -> String {
