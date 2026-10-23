@@ -13,6 +13,19 @@ public enum Keymap {
     public static let escape: UInt16 = 0x35
     public static let space: UInt16 = 0x31
 
+    /// Arrows, Tab, Escape, Return, and the other keys that move through the
+    /// app instead of composing. Home, End, Page Up/Down, Forward Delete, and
+    /// F1/F2 are included so they are not swallowed.
+    public static func isNavigation(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case `return`, tab, escape,
+            0x73, 0x74, 0x75, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E:
+            return true
+        default:
+            return false
+        }
+    }
+
     private static let unshifted: [UInt16: Character] = [
         0x00: "a", 0x01: "s", 0x02: "d", 0x03: "f", 0x04: "h", 0x05: "g",
         0x06: "z", 0x07: "x", 0x08: "c", 0x09: "v", 0x0B: "b", 0x0C: "q",

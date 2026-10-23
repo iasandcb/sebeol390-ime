@@ -112,6 +112,14 @@ import Testing
     #expect(Keymap.qwertyCharacter(keyCode: 0x31, shift: false) == " ")
     #expect(Keymap.qwertyCharacter(keyCode: 0x17, shift: false) == "5")
     #expect(Keymap.qwertyCharacter(keyCode: 0x17, shift: true) == "%")
+    #expect(Keymap.isNavigation(0x7D))
+    #expect(Keymap.isNavigation(0x7B))
+    #expect(Keymap.isNavigation(0x7C))
+    #expect(Keymap.isNavigation(0x7E))
+    #expect(Keymap.isNavigation(Keymap.tab))
+    #expect(Keymap.isNavigation(Keymap.escape))
+    #expect(Keymap.isNavigation(Keymap.return))
+    #expect(!Keymap.isNavigation(0x07))
 }
 
 private func expectJamo(_ key: Character, _ kind: JamoKind, _ compat: Character) {

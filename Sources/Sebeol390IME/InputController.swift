@@ -32,11 +32,12 @@ final class SebeolInputController: IMKInputController {
         }
 
         if event.keyCode == Keymap.delete {
-            guard !session.preedit.isEmpty else { return false }
-            apply(session.backspace(), client: client)
+            let update = session.backspace()
+            guard update.field != .none else { return false }
+            apply(update, client: client)
             return true
         }
-        if event.keyCode == Keymap.return || event.keyCode == Keymap.tab || event.keyCode == Keymap.escape || isNavigation(event.keyCode) {
+        if Keymap.isNavigation(event.keyCode) {
             apply(session.commitDisplayed(), client: client)
             return false
         }
@@ -116,28 +117,62 @@ final class SebeolInputController: IMKInputController {
 
     private func apply(_ update: SessionUpdate, client: IMKTextInput) {
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
-        if let replace = update.replacePreviousUTF16, replace > 0 {
-            let selection = client.selectedRange()
-            let location = max(0, selection.location - replace)
-            let length = min(replace, selection.location)
-            let range = NSRange(location: location, length: length)
-            let end = (update.preedit as NSString).length
-            client.setMarkedText(
-                marked(update.preedit),
-                selectionRange: NSRange(location: end, length: 0),
-                replacementRange: range
-            )
+        switch update.field {
+        case .none:
             return
+        case .unmark(let text):
+            guard !text.isEmpty else { return }
+            client.insertText(text, replacementRange: notFound)
+        case .insert(let text):
+            guard !text.isEmpty else { return }
+            client.insertText(text, replacementRange: notFound)
+        case .mark(let text):
+            setMarked(text, replacement: notFound, client: client)
+        case .replaceBeforeCaret(let utf16, let text):
+            setMarked(text, replacement: rangeBeforeCaret(utf16, client: client), client: client)
+        case .insertThenMark(let insert, let mark):
+            if !insert.isEmpty {
+                client.insertText(insert, replacementRange: notFound)
+            }
+            setMarked(mark, replacement: notFound, client: client)
+        case .insertReplacing(let utf16, let text):
+            client.insertText(text, replacementRange: rangeBeforeCaret(utf16, client: client))
+        case .insertReplacingThenMark(let utf16, let insert, let mark):
+            client.insertText(insert, replacementRange: rangeBeforeCaret(utf16, client: client))
+            setMarked(mark, replacement: notFound, client: client)
+        case .clearMarkThenInsert(let utf16, let text):
+            setMarked("", replacement: notFound, client: client)
+            client.insertText(text, replacementRange: rangeBeforeCaret(utf16, client: client))
+        case .clearMarkThenMark(let utf16, let text):
+            setMarked("", replacement: notFound, client: client)
+            setMarked(text, replacement: rangeBeforeCaret(utf16, client: client), client: client)
+        case .rewrite(let utf16, let text, let thenMark):
+            let range = rangeBeforeCaret(utf16, client: client)
+            if thenMark.isEmpty {
+                client.insertText(text, replacementRange: range)
+            } else if text.isEmpty {
+                setMarked(thenMark, replacement: range, client: client)
+            } else {
+                client.insertText(text, replacementRange: range)
+                setMarked(thenMark, replacement: notFound, client: client)
+            }
         }
-        if !update.committed.isEmpty {
-            client.insertText(update.committed, replacementRange: notFound)
-        }
-        let end = (update.preedit as NSString).length
+    }
+
+    private func setMarked(_ text: String, replacement: NSRange, client: IMKTextInput) {
+        let end = (text as NSString).length
         client.setMarkedText(
-            marked(update.preedit),
+            marked(text),
             selectionRange: NSRange(location: end, length: 0),
-            replacementRange: notFound
+            replacementRange: replacement
         )
+    }
+
+    private func rangeBeforeCaret(_ utf16: Int, client: IMKTextInput) -> NSRange {
+        let selection = client.selectedRange()
+        let location = max(0, selection.location - utf16)
+        let length = min(utf16, selection.location)
+        return NSRange(location: location, length: length)
     }
 
     private func marked(_ text: String) -> Any {
@@ -157,15 +192,6 @@ final class SebeolInputController: IMKInputController {
             }
         }
         return string
-    }
-
-    private func isNavigation(_ keyCode: UInt16) -> Bool {
-        switch keyCode {
-        case 0x73, 0x74, 0x75, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E:
-            return true
-        default:
-            return false
-        }
     }
 }
 

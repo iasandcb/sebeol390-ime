@@ -7,15 +7,54 @@ public enum Language: String, Equatable, Sendable {
     public var flipped: Language { self == .korean ? .english : .korean }
 }
 
+/// What the field should do with this key. English is inserted as ordinary
+/// text. Only an open Hangul composition is marked, so an address bar does
+/// not treat Latin letters as inline composition.
+public enum FieldEdit: Equatable, Sendable {
+    /// Do not touch the field.
+    case none
+    /// Confirm the marked Hangul by inserting the same characters. Nothing is rewritten.
+    case unmark(String)
+    /// `insertText`. Replaces the marked range when one exists; otherwise appends.
+    case insert(String)
+    /// `setMarkedText`, replacing the current marked range.
+    case mark(String)
+    /// `setMarkedText`, replacing this many UTF-16 units before the caret.
+    /// There is no marked range.
+    case replaceBeforeCaret(utf16: Int, text: String)
+    /// Insert `insert` (replacing the marked range), then mark `mark`.
+    case insertThenMark(insert: String, mark: String)
+    /// `insertText` over this many UTF-16 units before the caret.
+    case insertReplacing(utf16: Int, text: String)
+    /// Replace this many UTF-16 units with `insert`, then mark `mark`.
+    case insertReplacingThenMark(utf16: Int, insert: String, mark: String)
+    /// Clear the marked range, then replace this many committed UTF-16 units
+    /// with committed `text`.
+    case clearMarkThenInsert(utf16: Int, text: String)
+    /// Clear the marked range, then replace this many committed UTF-16 units
+    /// with marked `text`.
+    case clearMarkThenMark(utf16: Int, text: String)
+    /// Replace the open token, counted back from the caret through the mark
+    /// and the committed prefix, with committed `text` and then `thenMark`.
+    case rewrite(utf16: Int, text: String, thenMark: String)
+
+    /// Navigation can deliver the key unchanged: nothing is rewritten.
+    public var preservesCharacters: Bool {
+        switch self {
+        case .none, .unmark:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 public struct SessionUpdate: Equatable, Sendable {
-    public var committed: String
-    public var preedit: String
     public var mode: Language
     public var didAutoConvert: Bool
-    /// When set, replace this many UTF-16 units before the caret with `preedit`
-    /// instead of inserting `committed`. Used to undo a conversion that already
-    /// left the preedit.
-    public var replacePreviousUTF16: Int?
+    /// Marked Hangul after this update. Empty when nothing is in composition.
+    public var preedit: String
+    public var field: FieldEdit
 }
 
 public enum InputGate {
@@ -27,19 +66,26 @@ public enum InputGate {
 /// One word-in-progress. Each physical key is kept, and the visible text is
 /// re-read as QWERTY or as 세벌식 390. A reading changes only when the one in
 /// progress stops being plausible and another reading is.
+///
+/// Latin text is inserted immediately. `preedit` is only the Hangul syllable
+/// still being composed, so arrow keys never confirm an English composition.
 public final class Session {
     public var autoSwitch: Bool
     public private(set) var mode: Language
-    public private(set) var committed = ""
+    /// Hangul still open. Empty while the current token is English, digits, or finished.
     public private(set) var preedit = ""
 
-    public var document: String { committed + preedit }
+    public var document: String { finished + plain + preedit }
 
     private let lexicon: Lexicon
     private var keys: [KeyAtom] = []
     private var segments: [Segment] = []
     private var locked: Language?
     private var pendingUndo: Undo?
+    /// Closed words, already inserted.
+    private var finished = ""
+    /// Open-token prefix already inserted. The marked syllable, if any, follows it.
+    private var plain = ""
 
     public init(lexicon: Lexicon, autoSwitch: Bool = true, mode: Language = .korean) {
         self.lexicon = lexicon
@@ -62,23 +108,30 @@ public final class Session {
         if converted, let extended = extend(previous, to: keys.count) {
             pendingUndo = Undo(keys: keys, segments: extended, committedSuffix: nil)
         }
-        preedit = render(segments)
-        return currentUpdate(didAutoConvert: converted)
+        return syncClient(didAutoConvert: converted)
     }
 
     public func backspace() -> SessionUpdate {
         pendingUndo = nil
-        guard !keys.isEmpty else { return currentUpdate(didAutoConvert: false) }
+        guard !keys.isEmpty else { return make(.none, marked: preedit, didAutoConvert: false) }
+        let before = document
         keys.removeLast()
         if keys.isEmpty {
             segments = []
             locked = nil
-            preedit = ""
-            return currentUpdate(didAutoConvert: false)
+        } else {
+            _ = recompute(wordFinal: false, previous: nil)
         }
-        _ = recompute(wordFinal: false, previous: nil)
-        preedit = render(segments)
-        return currentUpdate(didAutoConvert: false)
+        let (nextPlain, nextMarked) = clientSplit()
+        let after = finished + nextPlain + nextMarked
+        // The letter is already in the field. Let the app delete it when that
+        // is exactly what the new reading is, so autocomplete sees a real delete.
+        if preedit.isEmpty, before.hasPrefix(after), utf16Length(before) == utf16Length(after) + 1 {
+            plain = nextPlain
+            preedit = nextMarked
+            return make(.none, marked: preedit, didAutoConvert: false)
+        }
+        return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: false)
     }
 
     /// Caps Lock / Shift+Space. Immediately after an automatic conversion this
@@ -88,28 +141,18 @@ public final class Session {
         if let undo = pendingUndo {
             pendingUndo = nil
             if let suffix = undo.committedSuffix {
-                if committed.hasSuffix(suffix) {
-                    committed.removeLast(suffix.count)
+                if finished.hasSuffix(suffix) {
+                    finished.removeLast(suffix.count)
                 }
-                keys = undo.keys
-                segments = undo.segments
-                locked = undo.segments.last?.lang ?? mode
-                mode = locked ?? mode
-                preedit = render(segments)
-                return SessionUpdate(
-                    committed: "",
-                    preedit: preedit,
-                    mode: mode,
-                    didAutoConvert: false,
-                    replacePreviousUTF16: utf16Length(suffix)
-                )
+                restore(undo)
+                let (nextPlain, nextMarked) = clientSplit()
+                let field = replaceFinishedSuffix(suffix, withPlain: nextPlain, mark: nextMarked)
+                plain = nextPlain
+                preedit = nextMarked
+                return make(field, marked: preedit, didAutoConvert: false)
             }
-            keys = undo.keys
-            segments = undo.segments
-            locked = undo.segments.last?.lang ?? mode
-            mode = locked ?? mode
-            preedit = render(segments)
-            return currentUpdate(didAutoConvert: false)
+            restore(undo)
+            return syncClient(didAutoConvert: false)
         }
 
         if !keys.isEmpty {
@@ -117,42 +160,42 @@ public final class Session {
             locked = flipped
             mode = flipped
             segments = [Segment(start: 0, end: keys.count, lang: flipped)]
-            preedit = render(segments)
-            return currentUpdate(didAutoConvert: false)
+            return syncClient(didAutoConvert: false)
         }
 
         mode = mode.flipped
         locked = nil
-        return currentUpdate(didAutoConvert: false)
+        return make(.none, marked: preedit, didAutoConvert: false)
     }
 
-    /// Commit the visible word without re-scoring it (focus loss, shortcut).
+    /// Hand the caret back to the app without rewriting characters. English
+    /// is already inserted. Hangul, if any, is unmarked in place.
     public func commitDisplayed() -> SessionUpdate {
         pendingUndo = nil
-        let text = preedit
+        let field: FieldEdit = preedit.isEmpty ? .none : .unmark(preedit)
+        finished += plain + preedit
         clearToken()
-        guard !text.isEmpty else { return currentUpdate(didAutoConvert: false) }
-        committed += text
-        return SessionUpdate(committed: text, preedit: "", mode: mode, didAutoConvert: false, replacePreviousUTF16: nil)
+        return make(field, marked: "", didAutoConvert: false)
     }
 
     public func forceMode(_ language: Language) -> SessionUpdate {
         let update = commitDisplayed()
         mode = language
         locked = nil
-        return SessionUpdate(committed: update.committed, preedit: "", mode: mode, didAutoConvert: false, replacePreviousUTF16: nil)
+        return SessionUpdate(mode: mode, didAutoConvert: false, preedit: "", field: update.field)
     }
 
     public func discard() -> SessionUpdate {
+        let field: FieldEdit = preedit.isEmpty ? .none : .mark("")
+        finished += plain
         clearToken()
         pendingUndo = nil
-        preedit = ""
-        return currentUpdate(didAutoConvert: false)
+        return make(field, marked: "", didAutoConvert: false)
     }
 
     public var debugLine: String {
         let description = segments.map { "\($0.lang.rawValue):\($0.start)-\($0.end)" }.joined(separator: " ")
-        return "\(document) {\(description)} mode=\(mode.rawValue) lock=\(locked?.rawValue ?? "-")"
+        return "\(document) {\(description)} mode=\(mode.rawValue) lock=\(locked?.rawValue ?? "-") mark=\(preedit)"
     }
 
     private func finishWord(appending breaker: Character) -> SessionUpdate {
@@ -166,18 +209,56 @@ public final class Session {
         } else {
             pendingUndo = nil
         }
-        committed += suffix
+        let field = finishField(word: word, breaker: breaker)
+        finished += suffix
         let converted = word != before && !before.isEmpty
         clearToken()
-        preedit = ""
-        return SessionUpdate(committed: suffix, preedit: "", mode: mode, didAutoConvert: converted, replacePreviousUTF16: nil)
+        return make(field, marked: "", didAutoConvert: converted)
+    }
+
+    private func finishField(word: String, breaker: Character) -> FieldEdit {
+        let suffix = word + String(breaker)
+        let displayed = plain + preedit
+        if word == displayed {
+            if preedit.isEmpty {
+                return .insert(String(breaker))
+            }
+            return .insert(preedit + String(breaker))
+        }
+        if preedit.isEmpty {
+            return .insertReplacing(utf16: utf16Length(plain), text: suffix)
+        }
+        if plain.isEmpty || word.hasPrefix(plain) {
+            let rest = plain.isEmpty ? word : String(word.dropFirst(plain.count))
+            return .insert(rest + String(breaker))
+        }
+        return .clearMarkThenInsert(utf16: utf16Length(plain), text: suffix)
     }
 
     private func clearToken() {
         keys = []
         segments = []
         locked = nil
+        plain = ""
         preedit = ""
+    }
+
+    private func restore(_ undo: Undo) {
+        keys = undo.keys
+        segments = undo.segments
+        locked = undo.segments.last?.lang ?? mode
+        mode = locked ?? mode
+    }
+
+    private func replaceFinishedSuffix(_ suffix: String, withPlain nextPlain: String, mark nextMarked: String) -> FieldEdit {
+        let width = utf16Length(suffix)
+        if nextMarked.isEmpty {
+            return .insertReplacing(utf16: width, text: nextPlain)
+        }
+        if nextPlain.isEmpty {
+            return .replaceBeforeCaret(utf16: width, text: nextMarked)
+        }
+        return .insertReplacingThenMark(utf16: width, insert: nextPlain, mark: nextMarked)
     }
 
     @discardableResult
@@ -543,7 +624,7 @@ public final class Session {
     }
 
     /// A period after Hangul commits the word. A period inside an English or
-    /// dotted token ("agents.md", "a.b.c", "https://…") stays in the preedit.
+    /// dotted token ("agents.md", "a.b.c", "https://…") stays in that token.
     private func continuesAsCode(_ atom: KeyAtom) -> Bool {
         guard autoSwitch, locked == nil, !keys.isEmpty else { return false }
         guard CodeToken.joiners.contains(atom.english) else { return false }
@@ -585,8 +666,77 @@ public final class Session {
         return copy
     }
 
-    private func currentUpdate(didAutoConvert: Bool) -> SessionUpdate {
-        SessionUpdate(committed: "", preedit: preedit, mode: mode, didAutoConvert: didAutoConvert, replacePreviousUTF16: nil)
+    private func syncClient(didAutoConvert: Bool) -> SessionUpdate {
+        let (nextPlain, nextMarked) = clientSplit()
+        return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: didAutoConvert)
+    }
+
+    /// English, digits, and symbols are inserted. The trailing Hangul
+    /// composition stays marked so the syllable can still grow.
+    private func clientSplit() -> (plain: String, marked: String) {
+        guard let last = segments.last else { return ("", "") }
+        if last.lang == .korean, segmentComposes(last) {
+            return (render(Array(segments.dropLast())), render([last]))
+        }
+        return (render(segments), "")
+    }
+
+    private func segmentComposes(_ segment: Segment) -> Bool {
+        let pieces = Composer.compose(keys[segment.start..<segment.end]).pieces
+        return pieces.contains { piece in
+            switch piece {
+            case .syllable, .bareChoseong, .bareJungseong, .bareJongseong:
+                return true
+            case .digit, .symbol:
+                return false
+            }
+        }
+    }
+
+    private func emit(toPlain: String, toMarked: String, didAutoConvert: Bool) -> SessionUpdate {
+        let field = clientDiff(fromPlain: plain, fromMarked: preedit, toPlain: toPlain, toMarked: toMarked)
+        plain = toPlain
+        preedit = toMarked
+        return make(field, marked: toMarked, didAutoConvert: didAutoConvert)
+    }
+
+    private func clientDiff(fromPlain: String, fromMarked: String, toPlain: String, toMarked: String) -> FieldEdit {
+        if fromPlain == toPlain, fromMarked == toMarked {
+            return .none
+        }
+        if fromPlain == toPlain {
+            return .mark(toMarked)
+        }
+        if fromMarked.isEmpty, toPlain.hasPrefix(fromPlain) {
+            let delta = String(toPlain.dropFirst(fromPlain.count))
+            if toMarked.isEmpty { return .insert(delta) }
+            if delta.isEmpty { return .mark(toMarked) }
+            return .insertThenMark(insert: delta, mark: toMarked)
+        }
+        if fromMarked.isEmpty, fromPlain.hasPrefix(toPlain) {
+            let removed = utf16Length(String(fromPlain.dropFirst(toPlain.count)))
+            if toMarked.isEmpty {
+                return .insertReplacing(utf16: removed, text: "")
+            }
+            return .replaceBeforeCaret(utf16: removed, text: toMarked)
+        }
+        if toPlain.hasPrefix(fromPlain) {
+            let delta = String(toPlain.dropFirst(fromPlain.count))
+            if toMarked.isEmpty { return .insert(delta) }
+            if delta.isEmpty { return .mark(toMarked) }
+            return .insertThenMark(insert: delta, mark: toMarked)
+        }
+        if fromPlain.hasPrefix(toPlain) {
+            let removed = utf16Length(String(fromPlain.dropFirst(toPlain.count)))
+            if removed == 0 { return .mark(toMarked) }
+            return .clearMarkThenMark(utf16: removed, text: toMarked)
+        }
+        let span = utf16Length(fromPlain) + utf16Length(fromMarked)
+        return .rewrite(utf16: span, text: toPlain, thenMark: toMarked)
+    }
+
+    private func make(_ field: FieldEdit, marked: String, didAutoConvert: Bool) -> SessionUpdate {
+        SessionUpdate(mode: mode, didAutoConvert: didAutoConvert, preedit: marked, field: field)
     }
 
     private func utf16Length(_ text: String) -> Int {

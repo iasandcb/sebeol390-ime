@@ -180,8 +180,10 @@ private let lexicon: Lexicon = {
     #expect(session.preedit == "가")
     _ = session.input(" ")
     #expect(session.document == "가 ")
-    _ = session.input("x")
-    #expect(session.preedit == "x", "\(session.debugLine)")
+    let ex = session.input("x")
+    #expect(ex.field == .insert("x"))
+    #expect(session.preedit.isEmpty, "\(session.debugLine)")
+    #expect(session.document == "가 x")
 }
 
 @Test func englishWordsStayEnglish() {
@@ -223,7 +225,8 @@ private let lexicon: Lexicon = {
     _ = session.input("f")
     #expect(session.preedit == "가")
     _ = session.toggle()
-    #expect(session.preedit == "kf")
+    #expect(session.preedit.isEmpty)
+    #expect(session.document == "kf")
     #expect(session.mode == .english)
 }
 
@@ -234,7 +237,8 @@ private let lexicon: Lexicon = {
     _ = session.commitDisplayed()
     _ = session.forceMode(.english)
     _ = session.type("hello")
-    #expect(session.preedit == "hello")
+    #expect(session.preedit.isEmpty)
+    #expect(session.document.hasSuffix("hello"))
 }
 
 @Test func backspaceRemovesLastJamo() {
@@ -246,6 +250,157 @@ private let lexicon: Lexicon = {
     #expect(session.preedit == "ㄱ")
     _ = session.backspace()
     #expect(session.preedit == "")
+}
+
+@Test func englishIsInsertedAndNavigationDoesNotRewriteIt() {
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    let typed = session.input("x")
+    paper.apply(typed.field)
+    #expect(typed.field == .insert("x"))
+    #expect(session.preedit.isEmpty)
+    #expect(paper.text == "x")
+    #expect(paper.marked.isEmpty)
+
+    let before = session.document
+    let down = session.commitDisplayed()
+    paper.apply(down.field)
+    #expect(down.field.preservesCharacters)
+    #expect(down.field == .none)
+    #expect(session.document == before)
+    #expect(paper.text == before)
+
+    let english = Session(lexicon: lexicon, autoSwitch: false, mode: .english)
+    var englishPaper = Paper()
+    for character in "hello" {
+        let update = english.input(character)
+        englishPaper.apply(update.field)
+        #expect(english.preedit.isEmpty, "\(english.debugLine)")
+        #expect(update.field == .insert(String(character)))
+        #expect(englishPaper.marked.isEmpty)
+    }
+    #expect(english.document == "hello")
+    let tab = english.commitDisplayed()
+    #expect(tab.field == .none)
+    #expect(english.document == "hello")
+
+    let deploy = Session(lexicon: lexicon, mode: .korean)
+    var deployPaper = Paper()
+    for character in "deploy" {
+        let update = deploy.input(character)
+        deployPaper.apply(update.field)
+        #expect(deploy.preedit.isEmpty, "\(deploy.debugLine)")
+        #expect(deployPaper.marked.isEmpty)
+    }
+    #expect(deploy.document == "deploy")
+    let arrow = deploy.commitDisplayed()
+    #expect(arrow.field == .none)
+    #expect(deploy.document == "deploy")
+
+    let letter = Session(lexicon: lexicon, mode: .english)
+    let eye = letter.input("I")
+    #expect(eye.field == .insert("I"))
+    #expect(letter.preedit.isEmpty)
+    let escaped = letter.commitDisplayed()
+    #expect(escaped.field == .none)
+    #expect(letter.document == "I")
+}
+
+@Test func navigationLeavesHangulCharactersInPlace() {
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    paper.apply(session.input("k").field)
+    paper.apply(session.input("f").field)
+    #expect(session.preedit == "가")
+    #expect(paper.text == "가")
+    #expect(paper.marked == "가")
+    let arrow = session.commitDisplayed()
+    paper.apply(arrow.field)
+    #expect(arrow.field == .unmark("가"))
+    #expect(arrow.field.preservesCharacters)
+    #expect(session.document == "가")
+    #expect(session.preedit.isEmpty)
+    #expect(paper.text == "가")
+    #expect(paper.marked.isEmpty)
+}
+
+@Test func backspaceOfCommittedEnglishPassesThrough() {
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    paper.apply(session.input("x").field)
+    let deleted = session.backspace()
+    #expect(deleted.field == .none)
+    paper.deleteOne()
+    #expect(session.document.isEmpty)
+    #expect(paper.text.isEmpty)
+
+    paper.apply(session.input("v").field)
+    paper.apply(session.input("2").field)
+    #expect(session.preedit.isEmpty)
+    #expect(session.document == "v2")
+    #expect(paper.text == "v2")
+    #expect(paper.marked.isEmpty)
+}
+
+@Test func fieldEditsMatchTheDocument() {
+    let samples = [
+        "x ifs",
+        "a ifs",
+        "x ",
+        "k ",
+        "i ",
+        "v2",
+        "jd3yex",
+        "deploymr2hgsuc",
+        "AIyv",
+        "agents.md",
+        "https://agents.md",
+        "build.sh",
+        "MN",
+        "<N<L",
+        "hello",
+        "other",
+        "git push",
+        "don't",
+        "MNkr",
+        "k/f",
+        "kvf",
+    ]
+    var failures: [String] = []
+    for sample in samples {
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        var typed = ""
+        for character in sample {
+            typed.append(character)
+            let update = session.input(character)
+            paper.apply(update.field)
+            if paper.text != session.document || paper.marked != session.preedit {
+                failures.append("\(sample) [\(typed)] paper=\(paper.text) mark=\(paper.marked) doc=\(session.document) pre=\(session.preedit) \(update.field)")
+                break
+            }
+        }
+        let stopped = session.commitDisplayed()
+        paper.apply(stopped.field)
+        if stopped.field.preservesCharacters == false || paper.text != session.document {
+            failures.append("멈춤 \(sample) \(stopped.field) paper=\(paper.text) doc=\(session.document)")
+        }
+        if session.preedit.isEmpty == false || paper.marked.isEmpty == false {
+            failures.append("조합 남음 \(sample) \(session.preedit)")
+        }
+    }
+    let english = Session(lexicon: lexicon, mode: .english)
+    var paper = Paper()
+    for character in "TV API MN" {
+        let update = english.input(character)
+        paper.apply(update.field)
+        if paper.marked.isEmpty == false || paper.text != english.document {
+            failures.append("영문 \(paper.text) \(english.document)")
+            break
+        }
+    }
+    let report = failures.prefix(20).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
 }
 
 @Test func shortcutsAndSecureInputPassThrough() {
@@ -444,6 +599,77 @@ private enum SebeolKeys {
         }
         return nil
     }
+}
+
+/// Mirrors InputController.apply so tests can see what the field would show.
+private struct Paper {
+    var committed = ""
+    var marked = ""
+    var text: String { committed + marked }
+
+    mutating func apply(_ field: FieldEdit) {
+        switch field {
+        case .none:
+            break
+        case .unmark(let string):
+            committed += string
+            marked = ""
+        case .insert(let string):
+            committed += string
+            marked = ""
+        case .mark(let string):
+            marked = string
+        case .replaceBeforeCaret(let utf16, let string):
+            committed = dropEnd(committed, utf16)
+            marked = string
+        case .insertThenMark(let insert, let mark):
+            committed += insert
+            marked = mark
+        case .insertReplacing(let utf16, let string):
+            committed = dropEnd(committed, utf16) + string
+            marked = ""
+        case .insertReplacingThenMark(let utf16, let insert, let mark):
+            committed = dropEnd(committed, utf16) + insert
+            marked = mark
+        case .clearMarkThenInsert(let utf16, let string):
+            marked = ""
+            committed = dropEnd(committed, utf16) + string
+        case .clearMarkThenMark(let utf16, let string):
+            marked = ""
+            committed = dropEnd(committed, utf16)
+            marked = string
+        case .rewrite(let utf16, let string, let thenMark):
+            var left = utf16
+            let markUnits = utf16Count(marked)
+            if left > 0 {
+                let take = min(left, markUnits)
+                marked = dropEnd(marked, take)
+                left -= take
+            }
+            if left > 0 {
+                committed = dropEnd(committed, left)
+            }
+            committed += string
+            marked = thenMark
+        }
+    }
+
+    mutating func deleteOne() {
+        if marked.isEmpty {
+            committed = dropEnd(committed, 1)
+        } else {
+            marked = dropEnd(marked, 1)
+        }
+    }
+}
+
+private func utf16Count(_ text: String) -> Int {
+    (text as NSString).length
+}
+
+private func dropEnd(_ text: String, _ utf16: Int) -> String {
+    let ns = text as NSString
+    return ns.substring(to: max(0, ns.length - utf16))
 }
 
 private extension Session {
