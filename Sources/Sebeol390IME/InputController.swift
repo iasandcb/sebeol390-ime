@@ -5,12 +5,16 @@ import Sebeol390Core
 
 @objc(SebeolInputController)
 final class SebeolInputController: IMKInputController {
-    private let session = Session(
-        lexicon: SharedLexicon.lexicon,
-        autoSwitch: true,
-        mode: .korean,
-        typos: SharedTypoLog.store
-    )
+    private let session: Session = {
+        let session = Session(
+            lexicon: SharedLexicon.lexicon,
+            autoSwitch: Preferences.autoSwitch,
+            mode: .korean,
+            typos: SharedTypoLog.store
+        )
+        session.correctsTypos = Preferences.correctsTypos
+        return session
+    }()
     private var sawCapsLockDown = false
 
     override func recognizedEvents(_ sender: Any!) -> Int {
@@ -20,6 +24,7 @@ final class SebeolInputController: IMKInputController {
 
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event, let client = sender as? IMKTextInput else { return false }
+        syncPreferences()
         if event.type == .flagsChanged {
             return handleFlags(event, client: client)
         }
@@ -84,10 +89,14 @@ final class SebeolInputController: IMKInputController {
     }
 
     override func menu() -> NSMenu! {
+        syncPreferences()
         let menu = NSMenu(title: "세벌식 390")
         let auto = menu.addItem(withTitle: "자동 한/영 전환", action: #selector(toggleAutoSwitch(_:)), keyEquivalent: "")
         auto.state = session.autoSwitch ? .on : .off
         auto.target = self
+        let typos = menu.addItem(withTitle: "오타 자동 교정", action: #selector(toggleTypoCorrection(_:)), keyEquivalent: "")
+        typos.state = session.correctsTypos ? .on : .off
+        typos.target = self
         menu.addItem(.separator())
         let korean = menu.addItem(withTitle: "한글 (세벌식 390)", action: #selector(selectKorean(_:)), keyEquivalent: "")
         korean.state = session.mode == .korean ? .on : .off
@@ -100,6 +109,17 @@ final class SebeolInputController: IMKInputController {
 
     @objc private func toggleAutoSwitch(_ sender: Any?) {
         session.autoSwitch.toggle()
+        Preferences.autoSwitch = session.autoSwitch
+    }
+
+    @objc private func toggleTypoCorrection(_ sender: Any?) {
+        session.correctsTypos.toggle()
+        Preferences.correctsTypos = session.correctsTypos
+    }
+
+    private func syncPreferences() {
+        session.autoSwitch = Preferences.autoSwitch
+        session.correctsTypos = Preferences.correctsTypos
     }
 
     @objc private func selectKorean(_ sender: Any?) {
@@ -234,6 +254,27 @@ final class SebeolInputController: IMKInputController {
 
 enum SharedTypoLog {
     static let store = TypoLog()
+}
+
+/// Menu toggles. Missing keys stay on, which is the default.
+enum Preferences {
+    private static let autoSwitchKey = "autoSwitch"
+    private static let correctTyposKey = "correctTypos"
+
+    static var autoSwitch: Bool {
+        get { stored(autoSwitchKey) }
+        set { UserDefaults.standard.set(newValue, forKey: autoSwitchKey) }
+    }
+
+    static var correctsTypos: Bool {
+        get { stored(correctTyposKey) }
+        set { UserDefaults.standard.set(newValue, forKey: correctTyposKey) }
+    }
+
+    private static func stored(_ key: String) -> Bool {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return true }
+        return UserDefaults.standard.bool(forKey: key)
+    }
 }
 
 enum SharedLexicon {

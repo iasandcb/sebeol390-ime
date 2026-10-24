@@ -964,8 +964,8 @@ private func sticksAsKorean(_ text: String) -> Bool {
     func committed(_ keys: String) -> String {
         Session(lexicon: lexicon, mode: .korean).type(keys + " ")
     }
-    let saram = SebeolKeys.keys(for: "싸람")!
-    #expect(committed(saram) == "사람 ")
+    let slang = SebeolKeys.keys(for: "싸람")!
+    #expect(committed(slang) == "싸람 ")
     #expect(committed(SebeolKeys.keys(for: "한글")!) == "한글 ")
     #expect(committed(SebeolKeys.keys(for: "했어")!) == "했어 ")
     #expect(committed(SebeolKeys.keys(for: "갔어")!) == "갔어 ")
@@ -994,13 +994,19 @@ private func sticksAsKorean(_ text: String) -> Bool {
     #expect(memory.rows[0].finalKeys == fixed)
 
     let seeded = MemoryTypos()
-    seeded.rows.append((wrong: "굴", wrongKeys: "x", final: "가", finalKeys: "kf"))
+    let rare = SebeolKeys.keys(for: "갂")!
+    seeded.rows.append((wrong: "갂", wrongKeys: rare, final: "가", finalKeys: "kf"))
     let again = Session(lexicon: lexicon, mode: .korean, typos: seeded)
-    let gul = SebeolKeys.keys(for: "굴")!
-    #expect(again.type(gul + " ") == "가 ")
-    seeded.rows.append((wrong: "굴", wrongKeys: "x", final: "나", finalKeys: "hf"))
+    #expect(again.type(rare + " ") == "가 ")
+    seeded.rows.append((wrong: "갂", wrongKeys: rare, final: "나", finalKeys: "hf"))
     let ambiguous = Session(lexicon: lexicon, mode: .korean, typos: seeded)
-    #expect(ambiguous.type(gul + " ") == "굴 ")
+    #expect(ambiguous.type(rare + " ") == "갂 ")
+
+    let real = MemoryTypos()
+    let gul = SebeolKeys.keys(for: "굴")!
+    real.rows.append((wrong: "굴", wrongKeys: gul, final: "가", finalKeys: "kf"))
+    let oyster = Session(lexicon: lexicon, mode: .korean, typos: real)
+    #expect(oyster.type(gul + " ") == "굴 ")
 
     let dropped = MemoryTypos()
     let secure = Session(lexicon: lexicon, mode: .korean, typos: dropped)
@@ -1041,6 +1047,103 @@ private func sticksAsKorean(_ text: String) -> Bool {
     }
     let report = failures.prefix(12).joined(separator: "\n")
     #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func realKoreanWordsStayUncorrected() {
+    #expect(lexicon.validKoreanWordCount > 100_000)
+    #expect(lexicon.isValidKorean("바탕"))
+    #expect(lexicon.isValidKorean("공간"))
+    let samples = [
+        "바탕", "공간", "사랑", "학교", "회사", "시간", "오늘", "내일", "컴퓨터", "키보드",
+        "창문", "하늘", "바다", "친구", "가족", "아침", "저녁", "커피", "전화", "마음",
+        "세상", "나라", "영화", "음악", "책상", "의자", "문장", "단어", "사전", "구름",
+        "바람", "나무", "교실", "학생", "부모", "아이", "점심", "저녁", "문제", "이유",
+    ]
+    var failures: [String] = []
+    for word in samples {
+        guard let keys = SebeolKeys.keys(for: word) else {
+            failures.append("no keys \(word)")
+            continue
+        }
+        let session = Session(lexicon: lexicon, mode: .korean)
+        if session.type(keys + " ") != word + " " {
+            failures.append("\(word) → \(session.document)")
+        }
+        for particle in ["에", "의", "을", "에서"] {
+            guard let tail = SebeolKeys.keys(for: particle) else { continue }
+            let combined = Session(lexicon: lexicon, mode: .korean)
+            let expected = word + particle + " "
+            if combined.type(keys + tail + " ") != expected {
+                failures.append("\(word)+\(particle) → \(combined.document)")
+            }
+        }
+    }
+    let oddKeys = (SebeolKeys.keys(for: "갂") ?? "") + (SebeolKeys.keys(for: "까") ?? "")
+    let odd = Session(lexicon: lexicon, mode: .korean)
+    if odd.type(oddKeys + " ") != "갂까 " {
+        failures.append("갂까 → \(odd.document)")
+    }
+    let report = failures.prefix(12).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func validityListSampleIsNotAutoCorrected() {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Resources/korean-valid.txt")
+    let words = (try! String(contentsOf: root, encoding: .utf8))
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") && $0.count >= 2 && $0.allSatisfy(isModernSyllable) }
+    var checked = 0
+    var failures: [String] = []
+    for (index, word) in words.enumerated() {
+        let named = word == "바탕" || word == "공간"
+        guard named || index % 40 == 0 else { continue }
+        guard let keys = SebeolKeys.keys(for: word) else { continue }
+        let atoms = keys.map { Layout390.atom(for: $0) }
+        if let fixed = TypoCorrector.correction(
+            composed: word,
+            keys: atoms,
+            language: .korean,
+            lexicon: lexicon,
+            memory: nil
+        ) {
+            failures.append("\(word) → \(fixed)")
+            if failures.count > 12 { break }
+        }
+        checked += 1
+    }
+    #expect(checked > 2000)
+    let report = failures.prefix(12).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func typoCorrectionCanBeTurnedOff() {
+    let typed = (SebeolKeys.keys(for: "한글") ?? "").replacing("g", with: "b")
+    let off = Session(lexicon: lexicon, mode: .korean)
+    off.correctsTypos = false
+    #expect(off.type(typed + " ") == "한굴 ")
+
+    let memory = MemoryTypos()
+    let retype = Session(lexicon: lexicon, mode: .korean, typos: memory)
+    retype.correctsTypos = false
+    _ = retype.type(typed)
+    _ = retype.backspace()
+    _ = retype.backspace()
+    _ = retype.type("gw ")
+    #expect(memory.rows.count == 1)
+    #expect(memory.rows[0].wrong == "한굴")
+    #expect(memory.rows[0].final == "한글")
+    #expect(retype.document == "한글 ")
+
+    let seeded = MemoryTypos()
+    seeded.rows.append((wrong: "한굴", wrongKeys: typed, final: "한글", finalKeys: SebeolKeys.keys(for: "한글")!))
+    let blocked = Session(lexicon: lexicon, mode: .korean, typos: seeded)
+    blocked.correctsTypos = false
+    #expect(blocked.type(typed + " ") == "한굴 ")
 }
 
 final class MemoryTypos: TypoMemory {

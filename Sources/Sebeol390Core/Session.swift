@@ -84,6 +84,8 @@ public enum InputGate {
 /// still being composed, so arrow keys never confirm an English composition.
 public final class Session {
     public var autoSwitch: Bool
+    /// When false, a finished word stays as typed. Retype logging still runs.
+    public var correctsTypos = true
     public private(set) var mode: Language
     /// Hangul still open. Empty while the current token is English, digits, or finished.
     public private(set) var preedit = ""
@@ -258,7 +260,7 @@ public final class Session {
         let composed = render(segments)
         noteRetype(final: composed)
         var word = composed
-        if locked == nil, let fixed = corrected(composed) {
+        if correctsTypos, locked == nil, let fixed = corrected(composed) {
             word = fixed
         }
         let suffix = word + String(breaker)

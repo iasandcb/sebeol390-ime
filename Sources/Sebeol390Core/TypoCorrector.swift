@@ -42,44 +42,31 @@ public enum TypoCorrector {
         }
     }
 
+    /// A valid or plausible Hangul word is left alone. Otherwise replace it
+    /// only when one frequent word (or that word plus the typed ending) uses
+    /// the same keys with exactly one of them different. An extra or missing
+    /// jamo stays, so 갔어 is not rewritten as 갔었.
     private static func korean(
         composed: String,
         keys: [KeyAtom],
         lexicon: Lexicon,
         memory: (any TypoMemory)?
     ) -> String? {
-        if isKnownKorean(composed, lexicon: lexicon) { return nil }
+        if isAlreadyKorean(composed, lexicon: lexicon) { return nil }
         if let logged = loggedKorean(composed, memory: memory, lexicon: lexicon) {
             return logged
         }
-        guard let typed = Composer.jamoSequence(keys), !typed.isEmpty else { return nil }
-        let typedUnits = typed.map { JamoUnit(kind: $0.kind, scalar: $0.scalar) }
-        guard jungCount(typedUnits) >= 2, modernSyllableCount(composed) >= 1 else { return nil }
-
-        let limit = typedUnits.count >= 8 ? longLimit : shortLimit
-        var found: [String: Int] = [:]
-        let entries = koreanEntries(lexicon)
-
-        func consider(_ text: String, _ cost: Int) {
-            guard text != composed, (1...limit).contains(cost) else { return }
-            if let old = found[text], old <= cost { return }
-            found[text] = cost
+        guard composed.count >= 2, composed.allSatisfy(isModernSyllable) else { return nil }
+        let typed = String(keys.map(\.english))
+        guard typed.count >= 2 else { return nil }
+        var winner: String?
+        for candidate in frequentCandidates(lexicon) {
+            guard isOneKeySubstitution(typed, candidate.keys) else { continue }
+            if let winner, winner != candidate.word { return nil }
+            winner = candidate.word
         }
-
-        if let (stem, ending) = KoreanEndings.split(composed),
-           let stemKeys = stemKeys(in: keys, stem: stem, ending: ending),
-           let stemUnits = Composer.jamoSequence(stemKeys)?.map({ JamoUnit(kind: $0.kind, scalar: $0.scalar) }),
-           jungCount(stemUnits) >= 2 {
-            for entry in entries {
-                let cost = editCost(stemUnits, entry.units, limit: limit, substitute: jamoCost, allowTranspose: false)
-                consider(entry.word + ending, cost)
-            }
-        }
-        for entry in entries {
-            let cost = editCost(typedUnits, entry.units, limit: limit, substitute: jamoCost, allowTranspose: false)
-            consider(entry.word, cost)
-        }
-        return uniqueWinner(found)
+        guard let winner, winner != composed else { return nil }
+        return winner
     }
 
     private static func english(composed: String, lexicon: Lexicon, memory: (any TypoMemory)?) -> String? {
@@ -115,14 +102,24 @@ public enum TypoCorrector {
 
     private static func loggedKorean(_ composed: String, memory: (any TypoMemory)?, lexicon: Lexicon) -> String? {
         guard let logged = memory?.uniqueFinal(for: composed), logged != composed else { return nil }
-        guard isHangulReading(logged), isKnownKorean(logged, lexicon: lexicon) else { return nil }
+        guard isHangulReading(logged), isAlreadyKorean(logged, lexicon: lexicon) else { return nil }
         return logged
     }
 
-    private static func isKnownKorean(_ word: String, lexicon: Lexicon) -> Bool {
-        if lexicon.isKoreanWord(word) { return true }
-        if let (stem, _) = KoreanEndings.split(word), lexicon.isKoreanWord(stem) { return true }
+    /// Frequent words, the large validity list, a stem plus one ending, or an ending alone.
+    private static func isAlreadyKorean(_ word: String, lexicon: Lexicon) -> Bool {
+        let word = word.precomposedStringWithCanonicalMapping
+        if KoreanEndings.set.contains(word) { return true }
+        if lexicon.isKoreanWord(word) || lexicon.isValidKorean(word) { return true }
+        if let (stem, _) = KoreanEndings.split(word) {
+            if lexicon.isKoreanWord(stem) || lexicon.isValidKorean(stem) { return true }
+        }
         return false
+    }
+
+    private static func isModernSyllable(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else { return false }
+        return (0xAC00...0xD7A3).contains(scalar.value)
     }
 
     private static func isHangulReading(_ word: String) -> Bool {
@@ -130,12 +127,6 @@ public enum TypoCorrector {
         return word.unicodeScalars.allSatisfy { scalar in
             let value = scalar.value
             return (0xAC00...0xD7A3).contains(value) || (0x3131...0x318E).contains(value)
-        }
-    }
-
-    private static func modernSyllableCount(_ word: String) -> Int {
-        word.unicodeScalars.reduce(0) { count, scalar in
-            (0xAC00...0xD7A3).contains(scalar.value) ? count + 1 : count
         }
     }
 
@@ -154,35 +145,8 @@ public enum TypoCorrector {
         return winners[0]
     }
 
-    private static func stemKeys(in keys: [KeyAtom], stem: String, ending: String) -> [KeyAtom]? {
-        for index in 0...keys.count {
-            let head = Composer.compose(keys[..<index]).text.precomposedStringWithCanonicalMapping
-            let tail = Composer.compose(keys[index...]).text.precomposedStringWithCanonicalMapping
-            if head == stem && tail == ending {
-                return Array(keys[..<index])
-            }
-        }
-        return nil
-    }
-
-    private static func jungCount(_ units: [JamoUnit]) -> Int {
-        units.reduce(0) { $0 + ($1.kind == .jungseong ? 1 : 0) }
-    }
-
-    private struct JamoUnit: Equatable {
-        var kind: JamoKind
-        var scalar: UInt32
-
-        var jamo: Jamo { Jamo(scalar: scalar, kind: kind) }
-    }
-
-    private struct KoreanEntry {
-        var word: String
-        var units: [JamoUnit]
-    }
-
-    /// One cheap substitution. An inserted jamo (850) stays out, so 갔어 is
-    /// not rewritten as 갔었.
+    /// One adjacent-key substitution on an English word of at least four letters.
+    /// An inserted letter (850) loses to that substitution, so hellp becomes hello.
     private static let shortLimit = 700
     private static let longLimit = 1500
     private static let margin = 250
@@ -190,64 +154,9 @@ public enum TypoCorrector {
     private static let transposeCost = 700
     private static let genericCost = 2000
 
-    private static func jamoCost(_ left: JamoUnit, _ right: JamoUnit) -> Int {
-        if left == right { return 0 }
-        var best = genericCost
-        if let a = consonant(left), let b = consonant(right), a.base == b.base {
-            if a.series == b.series, left.kind != right.kind {
-                best = min(best, 550)
-            }
-            if a.series != b.series, Set([a.series, b.series]).isSubset(of: [0, 1]) {
-                best = min(best, 550)
-            }
-            if Set([a.series, b.series]) == [0, 2] {
-                best = min(best, 600)
-            }
-        }
-        if let leftKey = canonicalKey[left.jamo], let rightKey = canonicalKey[right.jamo], orthogonal(leftKey, rightKey) {
-            best = min(best, 550)
-        }
-        if Hangul.differsByOneComponent(left.jamo, right.jamo) {
-            best = min(best, 850)
-        }
-        return best
-    }
-
     private static func letterCost(_ left: Character, _ right: Character) -> Int {
         if left == right { return 0 }
         return orthogonal(left, right) ? 550 : genericCost
-    }
-
-    private struct Consonant {
-        var base: Int
-        var series: Int
-    }
-
-    /// series 0 plain, 1 tense, 2 aspirated. Same base and series on the
-    /// other side of 390 is the cho/jong slip.
-    private static func consonant(_ unit: JamoUnit) -> Consonant? {
-        switch unit.scalar {
-        case 0x1100, 0x11A8: return Consonant(base: 0, series: 0) // ㄱ
-        case 0x1101, 0x11A9: return Consonant(base: 0, series: 1) // ㄲ
-        case 0x110F, 0x11BF: return Consonant(base: 0, series: 2) // ㅋ
-        case 0x1103, 0x11AE: return Consonant(base: 1, series: 0) // ㄷ
-        case 0x1104: return Consonant(base: 1, series: 1) // ㄸ
-        case 0x1110, 0x11C0: return Consonant(base: 1, series: 2) // ㅌ
-        case 0x1107, 0x11B8: return Consonant(base: 2, series: 0) // ㅂ
-        case 0x1108: return Consonant(base: 2, series: 1) // ㅃ
-        case 0x1111, 0x11C1: return Consonant(base: 2, series: 2) // ㅍ
-        case 0x1109, 0x11BA: return Consonant(base: 3, series: 0) // ㅅ
-        case 0x110A, 0x11BB: return Consonant(base: 3, series: 1) // ㅆ
-        case 0x110C, 0x11BD: return Consonant(base: 4, series: 0) // ㅈ
-        case 0x110D: return Consonant(base: 4, series: 1) // ㅉ
-        case 0x110E, 0x11BE: return Consonant(base: 4, series: 2) // ㅊ
-        case 0x1102, 0x11AB: return Consonant(base: 5, series: 0) // ㄴ
-        case 0x1105, 0x11AF: return Consonant(base: 6, series: 0) // ㄹ
-        case 0x1106, 0x11B7: return Consonant(base: 7, series: 0) // ㅁ
-        case 0x110B, 0x11BC: return Consonant(base: 8, series: 0) // ㅇ
-        case 0x1112, 0x11C2: return Consonant(base: 9, series: 0) // ㅎ
-        default: return nil
-        }
     }
 
     private static func editCost<T: Equatable>(
@@ -287,43 +196,99 @@ public enum TypoCorrector {
         return previous[right.count]
     }
 
-    private static func syllableUnits(_ word: String) -> [JamoUnit]? {
-        var units: [JamoUnit] = []
-        for character in word.precomposedStringWithCanonicalMapping {
-            guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else { return nil }
-            let value = scalar.value
-            guard (0xAC00...0xD7A3).contains(value) else { return nil }
-            let code = value - 0xAC00
-            units.append(JamoUnit(kind: .choseong, scalar: 0x1100 + code / 588))
-            units.append(JamoUnit(kind: .jungseong, scalar: 0x1161 + (code % 588) / 28))
-            let jong = code % 28
-            if jong > 0 {
-                units.append(JamoUnit(kind: .jongseong, scalar: 0x11A8 + jong - 1))
+    private struct FrequentCandidate {
+        var word: String
+        var keys: String
+    }
+
+    private final class CandidateCache: @unchecked Sendable {
+        let lock = NSLock()
+        var stored: [ObjectIdentifier: (count: Int, rows: [FrequentCandidate])] = [:]
+    }
+
+    private static let candidateCache = CandidateCache()
+
+    /// Frequent words, and each of those words with one grammatical ending.
+    /// The ending's keys are part of the same one-key comparison.
+    private static func frequentCandidates(_ lexicon: Lexicon) -> [FrequentCandidate] {
+        candidateCache.lock.lock()
+        defer { candidateCache.lock.unlock() }
+        let key = ObjectIdentifier(lexicon)
+        if let hit = candidateCache.stored[key], hit.count == lexicon.koreanWordCount {
+            return hit.rows
+        }
+        var rows: [FrequentCandidate] = []
+        var seen: Set<String> = []
+        func add(_ word: String, _ keys: String) {
+            let identity = word + "\u{0}" + keys
+            guard seen.insert(identity).inserted else { return }
+            rows.append(FrequentCandidate(word: word, keys: keys))
+        }
+        for word in lexicon.koreanWords() {
+            guard let keys = keystrokes(for: word) else { continue }
+            add(word, keys)
+            for ending in KoreanEndings.longestFirst {
+                guard let tail = keystrokes(for: ending) else { continue }
+                add(word + ending, keys + tail)
             }
         }
-        return units
+        candidateCache.stored[key] = (lexicon.koreanWordCount, rows)
+        return rows
     }
 
-    private final class EntryCache: @unchecked Sendable {
-        let lock = NSLock()
-        var stored: [ObjectIdentifier: (count: Int, entries: [KoreanEntry])] = [:]
+    /// Same number of keys, one position different. Inserting or deleting a key
+    /// is not a correction: 갔어 and 갔었 differ by the final ㅆ.
+    private static func isOneKeySubstitution(_ typed: String, _ canonical: String) -> Bool {
+        if typed.count != canonical.count || typed == canonical { return false }
+        let left = Array(typed)
+        let right = Array(canonical)
+        var mismatches = 0
+        for index in left.indices where left[index] != right[index] {
+            mismatches += 1
+            if mismatches > 1 { return false }
+        }
+        return mismatches == 1
     }
 
-    private static let entryCache = EntryCache()
+    private static func keystrokes(for word: String) -> String? {
+        var result = ""
+        for character in word.precomposedStringWithCanonicalMapping {
+            guard let part = keystrokes(for: character) else { return nil }
+            result += part
+        }
+        return result.isEmpty ? nil : result
+    }
 
-    private static func koreanEntries(_ lexicon: Lexicon) -> [KoreanEntry] {
-        entryCache.lock.lock()
-        defer { entryCache.lock.unlock() }
-        let key = ObjectIdentifier(lexicon)
-        if let hit = entryCache.stored[key], hit.count == lexicon.koreanWordCount {
-            return hit.entries
+    private static func keystrokes(for syllable: Character) -> String? {
+        guard let scalar = syllable.unicodeScalars.first, syllable.unicodeScalars.count == 1 else { return nil }
+        let value = scalar.value
+        guard (0xAC00...0xD7A3).contains(value) else { return nil }
+        let code = value - 0xAC00
+        let cho = 0x1100 + code / 588
+        let jung = 0x1161 + (code % 588) / 28
+        let jong = code % 28
+        guard let choKeys = keySequence(.choseong, cho), let jungKeys = keySequence(.jungseong, jung) else { return nil }
+        var text = choKeys + jungKeys
+        if jong != 0 {
+            guard let jongKeys = keySequence(.jongseong, 0x11A8 + jong - 1) else { return nil }
+            text += jongKeys
         }
-        let entries = lexicon.koreanWords().compactMap { word -> KoreanEntry? in
-            guard let units = syllableUnits(word) else { return nil }
-            return KoreanEntry(word: word, units: units)
+        return text
+    }
+
+    /// A letter key wins over a digit that produces the same jamo. ㄲ·ㄸ·ㅃ·ㅆ·ㅉ
+    /// and compound vowels or batchim are the two keys that merge into them.
+    private static func keySequence(_ kind: JamoKind, _ scalar: UInt32) -> String? {
+        let target = Jamo(scalar: scalar, kind: kind)
+        if let key = canonicalKey[target] { return String(key) }
+        for (first, firstKey) in canonicalKey where first.kind == kind {
+            for (second, secondKey) in canonicalKey where second.kind == kind {
+                if Hangul.merge(first, second) == target {
+                    return String(firstKey) + String(secondKey)
+                }
+            }
         }
-        entryCache.stored[key] = (lexicon.koreanWordCount, entries)
-        return entries
+        return nil
     }
 
     private static let canonicalKey: [Jamo: Character] = {
@@ -353,8 +318,7 @@ public enum TypoCorrector {
         return map
     }()
 
-    /// Shares an edge. A diagonal pair such as ㄱ(k) and ㅎ(m) is left alone,
-    /// so 갔어 is not rewritten as 했어.
+    /// Shares an edge. A diagonal pair is not a one-key slip.
     private static func orthogonal(_ left: Character, _ right: Character) -> Bool {
         guard let a = keyPosition[left], let b = keyPosition[right] else { return false }
         return abs(a.0 - b.0) + abs(a.1 - b.1) == 1

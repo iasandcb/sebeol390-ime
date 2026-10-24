@@ -18,7 +18,7 @@ STAGE="$(mktemp -d)/Sebeol390.app"
 mkdir -p "${STAGE}/Contents/MacOS" "${STAGE}/Contents/Resources"
 cp "${BIN}" "${STAGE}/Contents/MacOS/Sebeol390"
 cp Resources/Info.plist "${STAGE}/Contents/Info.plist"
-cp Resources/english-words.txt Resources/english-extra.txt Resources/korean-words.txt "${STAGE}/Contents/Resources/"
+cp Resources/english-words.txt Resources/english-extra.txt Resources/korean-words.txt Resources/korean-valid.txt Resources/korean-valid.LICENSE "${STAGE}/Contents/Resources/"
 printf 'APPL????' > "${STAGE}/Contents/PkgInfo"
 chmod +x "${STAGE}/Contents/MacOS/Sebeol390"
 

@@ -29,3 +29,9 @@ copyright has lapsed. See /usr/share/dict/README on macOS.
 
 Resources/english-extra.txt and Resources/korean-words.txt are original
 compilations written for this project.
+
+Resources/korean-valid.txt is a Hangul word list derived from
+open-korean-text (https://github.com/open-korean-text/open-korean-text).
+Copyright 2014 Twitter, Inc. and the open-korean-text contributors.
+That file is licensed under the Apache License, Version 2.0, not the MIT
+license above. See Resources/korean-valid.LICENSE.

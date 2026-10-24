@@ -3,14 +3,23 @@ import Foundation
 public final class Lexicon: @unchecked Sendable {
     private let english: [String]
     private let korean: Set<String>
+    /// Large Hangul list used only to refuse auto-correction. Not the language lexicon.
+    private let validKorean: Set<String>
     private let abbreviations: Set<String>
     private let techStems: Set<String>
     private let indexLock = NSLock()
     private var englishByLength: [Int: [String]]?
 
-    public init(english: [String], korean: [String], abbreviations: [String] = [], techStems: [String] = []) {
+    public init(
+        english: [String],
+        korean: [String],
+        abbreviations: [String] = [],
+        techStems: [String] = [],
+        validKorean: [String] = []
+    ) {
         self.english = Array(Set(english.map { $0.lowercased() })).sorted()
         self.korean = Set(korean.map { $0.precomposedStringWithCanonicalMapping })
+        self.validKorean = Set(validKorean.map { $0.precomposedStringWithCanonicalMapping })
         self.abbreviations = Set(abbreviations.map { $0.uppercased() })
         self.techStems = Set(techStems.map { $0.lowercased() })
     }
@@ -31,7 +40,14 @@ public final class Lexicon: @unchecked Sendable {
         korean.contains(word.precomposedStringWithCanonicalMapping)
     }
 
+    /// True when `word` is in the large validity list. Frequent words live in `isKoreanWord`.
+    public func isValidKorean(_ word: String) -> Bool {
+        validKorean.contains(word.precomposedStringWithCanonicalMapping)
+    }
+
     public var koreanWordCount: Int { korean.count }
+
+    public var validKoreanWordCount: Int { validKorean.count }
 
     public func koreanWords() -> [String] {
         Array(korean)
@@ -86,11 +102,13 @@ public final class Lexicon: @unchecked Sendable {
         let english = try lines(directory.appendingPathComponent("english-words.txt"))
         let extra = (try? lines(directory.appendingPathComponent("english-extra.txt"))) ?? []
         let korean = try lines(directory.appendingPathComponent("korean-words.txt"))
+        let valid = (try? lines(directory.appendingPathComponent("korean-valid.txt"))) ?? []
         return Lexicon(
             english: english + extra,
             korean: korean,
             abbreviations: Self.defaultAbbreviations,
-            techStems: Self.defaultTechStems
+            techStems: Self.defaultTechStems,
+            validKorean: valid
         )
     }
 
