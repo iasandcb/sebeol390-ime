@@ -489,6 +489,34 @@ private func clientFailures(_ keys: String, _ expected: String, mode: Language) 
     return failures
 }
 
+@Test func batchimOnDigitKeysStaysKorean() {
+    let words = ["했어", "있어", "했다", "갔어", "없어", "있는", "했습니다", "했는데"]
+    var failures: [String] = []
+    for word in words {
+        guard let keys = SebeolKeys.keys(for: word) else {
+            failures.append("키 없음 \(word)")
+            continue
+        }
+        if let drift = hangulDrift(keys) {
+            failures.append("\(word) \(drift)")
+        }
+        failures += clientFailures(keys + ".", word + ".", mode: .korean)
+        failures += clientFailures(keys + " ", word + " ", mode: .korean)
+        let session = Session(lexicon: lexicon, mode: .korean)
+        var paper = Paper()
+        for character in keys + "." {
+            paper.apply(session.input(character).field)
+        }
+        if paper.text != word + "." || paper.text.contains(" ") {
+            failures.append("마침표 \(keys). paper=\(paper.text) / \(word).")
+        }
+    }
+    failures += clientFailures("mr2jt.", "했어.", mode: .korean)
+    failures += clientFailures("mr2jt ", "했어 ", mode: .korean)
+    let report = failures.prefix(20).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
 @Test func doubledChoseongStaysKorean() {
     let words = [
         "까", "따", "빠", "싸", "짜", "쪽", "꼭", "똑", "뽕", "쌓",

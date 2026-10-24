@@ -60,6 +60,18 @@ final class SebeolInputController: IMKInputController {
         apply(session.commitDisplayed(), client: client)
     }
 
+    /// ESC and a client that ends composition on '.' ask for the original
+    /// keystrokes. Those keys are `mr2jt` for 했어, so return the Hangul
+    /// that is actually marked.
+    override func originalString(_ sender: Any!) -> NSAttributedString! {
+        NSAttributedString(string: session.preedit)
+    }
+
+    override func cancelComposition() {
+        guard let client = client() else { return }
+        apply(session.commitDisplayed(), client: client)
+    }
+
     override func deactivateServer(_ sender: Any!) {
         commitComposition(sender)
         super.deactivateServer(sender)
@@ -122,10 +134,10 @@ final class SebeolInputController: IMKInputController {
             return
         case .unmark(let text):
             guard !text.isEmpty else { return }
-            client.insertText(text, replacementRange: notFound)
+            insertCommitting(text, client: client)
         case .insert(let text):
             guard !text.isEmpty else { return }
-            client.insertText(text, replacementRange: notFound)
+            insertCommitting(text, client: client)
         case .mark(let text):
             setMarked(text, replacement: notFound, client: client)
         case .replaceBeforeCaret(let utf16, let text):
@@ -156,6 +168,19 @@ final class SebeolInputController: IMKInputController {
                 client.insertText(text, replacementRange: range)
                 setMarked(thenMark, replacement: notFound, client: client)
             }
+        }
+    }
+
+    /// A mark is the Hangul being composed. Replacing that range commits it.
+    /// `NSNotFound` inserts at the caret instead, and the client then keeps
+    /// the raw keys (`mr2jt`) and puts the period after a space.
+    private func insertCommitting(_ text: String, client: IMKTextInput) {
+        let marked = client.markedRange()
+        if marked.location != NSNotFound, marked.length > 0 {
+            client.insertText(text, replacementRange: marked)
+        } else {
+            let notFound = NSRange(location: NSNotFound, length: NSNotFound)
+            client.insertText(text, replacementRange: notFound)
         }
     }
 

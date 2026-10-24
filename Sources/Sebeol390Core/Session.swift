@@ -557,7 +557,8 @@ public final class Session {
             return ReadingQuality(score: strong ? 210 : 96, solid: strong)
         }
         if text.allSatisfy(\.isNumber) {
-            // One number-row key is a jamo. A run of them ("2024") is a number.
+            // One number-row key is a jamo ("2" is ㅆ). A run of them ("2024")
+            // is a number. A syllable that merely contains ㅆ is not this case.
             if text.count == 1 {
                 return ReadingQuality(score: 18, solid: false)
             }
