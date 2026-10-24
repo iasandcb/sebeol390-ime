@@ -370,6 +370,19 @@ public final class Session {
             return changed
         }
 
+        // ㄲ·ㄸ·ㅃ·ㅆ·ㅉ are one choseong typed with two keys. "ll" is also the
+        // prefix of "llvm", so the pair must stay ㅉ and not become Latin.
+        if prefersDoubledChoseong() {
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            var changed = false
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = render(korean) != render(extended)
+            }
+            segments = korean
+            mode = .korean
+            return changed
+        }
+
         // ㅎㅎ, ㅋㅋ, ㅠㅠ, ㄱㅅ. The first ㅠ is only the key "5", so the
         // mode flips, but the word was started in Korean.
         if prefersBareJamoRun(previous) {
@@ -693,6 +706,14 @@ public final class Session {
         "와", "과", "도", "만", "의", "하고", "했", "해", "하는",
     ]
 
+    /// Short heads that may keep a Hangul particle (`ktx는`, `api를`).
+    /// A 3-letter Webster hit such as "jfk" is not enough: it steals the
+    /// first ㄱ of 까.
+    private static let acronymHeads: Set<String> = [
+        "ktx", "srt", "api", "url", "mvp", "sdk", "llm", "gpt", "nlp",
+        "cpu", "gpu", "html", "css", "aws",
+    ]
+
     /// Index where an English acronym ends and a Hangul particle begins.
     /// Nil when the buffer should stay one language.
     private func acronymParticleSplit() -> Int? {
@@ -701,43 +722,51 @@ public final class Session {
         // Still typing "backfall" or "hello". A particle-shaped tail is a coincidence.
         if lexicon.isEnglishWord(spelling) || lexicon.isEnglishPrefix(spelling) { return nil }
         let whole = Composer.compose(keys)
+        // 아까, 아는, 뭔가, 쪽에서. A dictionary reading is never an acronym.
         if lexicon.isKoreanWord(whole.text) { return nil }
         let limit = min(6, keys.count - 1)
         guard limit >= 3 else { return nil }
+        let wholeClean: Bool
+        if case .clean = shape(of: whole.pieces) { wholeClean = true } else { wholeClean = false }
         for headEnd in 3...limit {
-            guard acronymHead(headEnd) else { continue }
             let tail = Composer.compose(keys[headEnd..<keys.count])
             guard Self.particles.contains(tail.text) else { continue }
             guard case .clean = shape(of: tail.pieces) else { continue }
+            let head = Composer.compose(keys[0..<headEnd])
+            // 열 is "jew". The syllable itself is a Korean word.
+            if lexicon.isKoreanWord(head.text) { continue }
+            let listed = Self.acronymHeads.contains(englishText(0..<headEnd).lowercased())
+            // Clean Hangul stays Korean. That includes a split which would
+            // break ㄲ·ㄸ·ㅃ·ㅆ·ㅉ or a compound batchim: 아까 is not 아ㄱ+가.
+            // Only an allowlisted acronym (ktx는) may still divide it.
+            if wholeClean {
+                guard listed else { continue }
+            } else {
+                guard strongAcronymHead(headEnd) else { continue }
+            }
             return headEnd
         }
         return nil
     }
 
-    /// A complete syllable stays Korean (`kts` is 건, so `건가` stays 건가).
-    /// It splits only when that spelling is a real English word or
-    /// abbreviation (`api`, `url`, `ktx`). A head that is not a syllable
-    /// can still take a particle.
-    private func acronymHead(_ headEnd: Int) -> Bool {
+    /// Allowlisted acronym, or an English dictionary word of at least four
+    /// letters. Used when the buffer is not itself clean Hangul (`github에`).
+    private func strongAcronymHead(_ headEnd: Int) -> Bool {
         let head = keys[0..<headEnd]
         let spelling = englishText(0..<headEnd)
         guard (3...6).contains(spelling.count), spelling.allSatisfy(\.isLetter) else { return false }
         guard !head.allSatisfy(isPadDigit) else { return false }
         let lower = spelling.lowercased()
-        if headReadsAsKorean(head) {
-            // "jew" is 열. A dictionary syllable stays Korean.
-            if lexicon.isKoreanWord(Composer.compose(head).text) { return false }
-            return lexicon.isEnglishWord(lower) || lexicon.isAbbreviation(spelling)
-        }
-        return true
+        if Self.acronymHeads.contains(lower) { return true }
+        return spelling.count >= 4 && lexicon.isEnglishWord(lower)
     }
 
-    private func headReadsAsKorean(_ head: ArraySlice<KeyAtom>) -> Bool {
-        let composition = Composer.compose(head)
-        if case .clean(let syllables) = shape(of: composition.pieces), syllables >= 1 {
-            return true
-        }
-        return false
+    /// ㄲ·ㄸ·ㅃ·ㅆ·ㅉ before the vowel. Two choseong keys, one jamo.
+    private func prefersDoubledChoseong() -> Bool {
+        guard wordMode == .korean, keys.count == 2 else { return false }
+        guard case .jamo(let first) = keys[0].korean, case .jamo(let second) = keys[1].korean else { return false }
+        guard first.kind == .choseong, second.kind == .choseong, Hangul.merge(first, second) != nil else { return false }
+        return Composer.compose(keys).pieces == [.bareChoseong]
     }
 
     /// "Introduce" / "Open" / "Hello". The first shifted key is a digit or

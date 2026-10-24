@@ -359,6 +359,8 @@ private let lexicon: Lexicon = {
         ";;": "ㅃ",
         "j0": "ㅇㅋ",
         "kk": "ㄲ",
+        "ll": "ㅉ",
+        "nn": "ㅆ",
         "000 \(jinjja)": "ㅋㅋㅋ 진짜",
         "\(joha)mm": "좋아ㅎㅎ",
     ]
@@ -487,6 +489,46 @@ private func clientFailures(_ keys: String, _ expected: String, mode: Language) 
     return failures
 }
 
+@Test func doubledChoseongStaysKorean() {
+    let words = [
+        "까", "따", "빠", "싸", "짜", "쪽", "꼭", "똑", "뽕", "쌓",
+        "쪽에서", "쪽은", "똑같이", "아까", "어까", "이까", "아가", "아는",
+        "아빠", "쓰레기", "깨끗", "따뜻", "짜증", "뭔가",
+    ]
+    let particles = [
+        "는", "은", "이", "가", "를", "을", "에", "에서", "로", "으로",
+        "와", "과", "도", "만", "의", "하고", "했", "해", "하는",
+    ]
+    var failures: [String] = []
+    for word in words {
+        guard let keys = SebeolKeys.keys(for: word) else {
+            failures.append("키 없음 \(word)")
+            continue
+        }
+        if let drift = hangulDrift(keys) {
+            failures.append("\(word) \(drift)")
+        }
+        failures += clientFailures(keys, word, mode: .korean)
+        for particle in particles {
+            guard let tail = SebeolKeys.keys(for: particle) else { continue }
+            let combined = word + particle
+            if let drift = hangulDrift(keys + tail) {
+                failures.append("\(combined) \(drift)")
+            }
+        }
+    }
+    if let geurok = SebeolKeys.keys(for: "그록"), let jjok = SebeolKeys.keys(for: "쪽에서") {
+        failures += clientFailures(geurok + " " + jjok, "그록 쪽에서", mode: .korean)
+        if let drift = hangulDrift(jjok) {
+            failures.append("쪽에서 \(drift)")
+        }
+    } else {
+        failures.append("키 없음 그록 쪽에서")
+    }
+    let report = failures.prefix(20).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
 @Test func acronymPlusParticle() {
     let samples: [(String, String)] = [
         ("ktx", "는"),
@@ -544,15 +586,12 @@ private func clientFailures(_ keys: String, _ expected: String, mode: Language) 
     var failures: [String] = []
     for word in words {
         guard let wordKeys = SebeolKeys.keys(for: word) else { continue }
+        if let drift = hangulDrift(wordKeys) {
+            failures.append("\(word) \(drift)")
+        }
         for (particle, tail) in particleKeys {
-            let keys = wordKeys + tail
-            let session = Session(lexicon: lexicon, mode: .korean)
-            for character in keys {
-                _ = session.input(character)
-            }
-            let hangul = Composer.compose(keys.map { Layout390.atom(for: $0) }).text
-            if session.document != hangul {
-                failures.append("\(word)+\(particle) \(keys) → \(session.document) / \(hangul)")
+            if let drift = hangulDrift(wordKeys + tail) {
+                failures.append("\(word)+\(particle) \(drift)")
             }
         }
     }
@@ -839,6 +878,22 @@ private func assertTypes(_ keys: String, _ expected: String, mode: Language = .k
         trace.append(session.debugLine)
     }
     #expect(session.document == expected, "\(trace.joined(separator: "\n"))")
+}
+
+/// Every prefix must stay the Hangul those keys compose. A Latin flash
+/// (`ll` for ㅉ, `jfk가` for 아까) is a failure even if the last key recovers.
+private func hangulDrift(_ keys: String) -> String? {
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var typed = ""
+    for character in keys {
+        typed.append(character)
+        _ = session.input(character)
+        let hangul = Composer.compose(typed.map { Layout390.atom(for: $0) }).text
+        if session.document != hangul {
+            return "\(typed) → \(session.document) / \(hangul)"
+        }
+    }
+    return nil
 }
 
 private func isModernSyllable(_ character: Character) -> Bool {
