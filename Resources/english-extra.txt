@@ -92,6 +92,13 @@ gcp
 azure
 kubectl
 kubernetes
+ktx
+srt
+mvp
+sdk
+llm
+gpt
+nlp
 terraform
 plist
 async

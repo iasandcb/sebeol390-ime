@@ -506,19 +506,57 @@ private func clientFailures(_ keys: String, _ expected: String, mode: Language) 
         }
         failures += clientFailures(head + tail, head + particle, mode: .korean)
     }
-    for word in ["나는", "가는", "하는", "했는데", "입력", "한은", "집은"] {
+    for word in ["나는", "가는", "하는", "했는데", "입력", "한은", "집은", "건가", "건데", "된는", "한다는", "것은", "걸로", "내가", "뭔가"] {
         guard let keys = SebeolKeys.keys(for: word) else {
             failures.append("키 없음 \(word)")
             continue
         }
         failures += clientFailures(keys, word, mode: .korean)
     }
+    failures += clientFailures("ktskf", "건가", mode: .korean)
     failures += clientFailures("hello", "hello", mode: .korean)
     failures += clientFailures("other", "other", mode: .korean)
     failures += clientFailures("Introduce", "Introduce", mode: .korean)
     failures += clientFailures("agents.md", "agents.md", mode: .korean)
     failures += clientFailures("mm", "ㅎㅎ", mode: .korean)
     let report = failures.prefix(16).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+@Test func koreanWordsStayKoreanBeforeParticles() {
+    let particles = [
+        "는", "은", "이", "가", "를", "을", "에", "에서", "로", "으로",
+        "와", "과", "도", "만", "의", "하고", "했", "해", "하는",
+    ]
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Resources/korean-words.txt")
+    let words = (try! String(contentsOf: root, encoding: .utf8))
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") && $0.allSatisfy(isModernSyllable) }
+    let particleKeys = particles.compactMap { particle -> (String, String)? in
+        guard let keys = SebeolKeys.keys(for: particle) else { return nil }
+        return (particle, keys)
+    }
+    var failures: [String] = []
+    for word in words {
+        guard let wordKeys = SebeolKeys.keys(for: word) else { continue }
+        for (particle, tail) in particleKeys {
+            let keys = wordKeys + tail
+            let session = Session(lexicon: lexicon, mode: .korean)
+            for character in keys {
+                _ = session.input(character)
+            }
+            let hangul = Composer.compose(keys.map { Layout390.atom(for: $0) }).text
+            if session.document != hangul {
+                failures.append("\(word)+\(particle) \(keys) → \(session.document) / \(hangul)")
+            }
+        }
+    }
+    let report = failures.prefix(30).joined(separator: "\n")
     #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
 }
 

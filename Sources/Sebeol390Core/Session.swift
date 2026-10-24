@@ -714,30 +714,30 @@ public final class Session {
         return nil
     }
 
-    /// "api"/"url" are words. "ktx"/"mvp" are consonant runs that are not a
-    /// Hangul dictionary stem. "한" starts 한글, so it is not an acronym.
+    /// A complete syllable stays Korean (`kts` is 건, so `건가` stays 건가).
+    /// It splits only when that spelling is a real English word or
+    /// abbreviation (`api`, `url`, `ktx`). A head that is not a syllable
+    /// can still take a particle.
     private func acronymHead(_ headEnd: Int) -> Bool {
         let head = keys[0..<headEnd]
         let spelling = englishText(0..<headEnd)
         guard (3...6).contains(spelling.count), spelling.allSatisfy(\.isLetter) else { return false }
         guard !head.allSatisfy(isPadDigit) else { return false }
         let lower = spelling.lowercased()
-        if lexicon.isEnglishWord(lower) || lexicon.isAbbreviation(spelling) { return true }
-        if headReadsAsKorean(head) { return false }
-        return !lower.contains { "aeiou".contains($0) }
+        if headReadsAsKorean(head) {
+            // "jew" is 열. A dictionary syllable stays Korean.
+            if lexicon.isKoreanWord(Composer.compose(head).text) { return false }
+            return lexicon.isEnglishWord(lower) || lexicon.isAbbreviation(spelling)
+        }
+        return true
     }
 
     private func headReadsAsKorean(_ head: ArraySlice<KeyAtom>) -> Bool {
         let composition = Composer.compose(head)
-        switch shape(of: composition.pieces) {
-        case .clean(let syllables) where syllables >= 2:
+        if case .clean(let syllables) = shape(of: composition.pieces), syllables >= 1 {
             return true
-        case .clean(1):
-            let text = composition.text
-            return lexicon.isKoreanWord(text) || lexicon.isKoreanPrefix(text)
-        default:
-            return false
         }
+        return false
     }
 
     /// "Introduce" / "Open" / "Hello". The first shifted key is a digit or
