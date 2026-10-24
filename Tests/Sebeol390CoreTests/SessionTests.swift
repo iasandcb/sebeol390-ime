@@ -834,6 +834,65 @@ private func sticksAsKorean(_ text: String) -> Bool {
     return body.allSatisfy { $0 == .syllable || $0 == .digit }
 }
 
+@Test func arrowsAfterDashAndEquals() {
+    let dash = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    paper.apply(dash.input("-").field)
+    paper.apply(dash.input(">").field)
+    #expect(paper.text == "->")
+    #expect(dash.document == "->")
+    paper.apply(dash.toggle().field)
+    #expect(paper.text == "-3")
+    #expect(dash.document == "-3")
+    paper.apply(dash.input(" ").field)
+    #expect(paper.text == "-3 ")
+    #expect(dash.document == "-3 ")
+
+    let equals = Session(lexicon: lexicon, mode: .korean)
+    var equalsPaper = Paper()
+    equalsPaper.apply(equals.input("=").field)
+    equalsPaper.apply(equals.input(">").field)
+    #expect(equalsPaper.text == "=>")
+    equalsPaper.apply(equals.toggle().field)
+    #expect(equalsPaper.text == "=3")
+    #expect(equals.document == "=3")
+
+    #expect(Session(lexicon: lexicon, mode: .korean).type(">") == "3")
+    #expect(Session(lexicon: lexicon, mode: .korean).type("<") == "2")
+    #expect(Session(lexicon: lexicon, mode: .korean).type("-<") == "-2")
+    #expect(Session(lexicon: lexicon, mode: .korean).type("Y-") == "<-")
+    #expect(Session(lexicon: lexicon, mode: .korean).type("-->") == "-->")
+    #expect(Session(lexicon: lexicon, mode: .korean).type(">.MJ") == "3.14")
+    #expect(Session(lexicon: lexicon, mode: .english).type("=>") == "=>")
+
+    let hangul = (SebeolKeys.keys(for: "한글") ?? "") + "->"
+    #expect(Session(lexicon: lexicon, mode: .korean).type(hangul) == "한글->")
+
+    let consumed = Session(lexicon: lexicon, mode: .korean)
+    _ = consumed.type("->")
+    _ = consumed.input(" ")
+    _ = consumed.toggle()
+    #expect(consumed.document == "-> ")
+}
+
+@Test func shiftDigitKeysCanStaySymbols() {
+    let symbols = Session(lexicon: lexicon, mode: .korean)
+    symbols.shiftDigitsAsSymbols = true
+    #expect(symbols.type("MN<>") == "MN<>")
+    #expect(symbols.type("UIOJKL") == "MN<>UIOJKL")
+
+    let arrow = Session(lexicon: lexicon, mode: .korean)
+    arrow.shiftDigitsAsSymbols = true
+    #expect(arrow.type("->") == "->")
+    _ = arrow.toggle()
+    #expect(arrow.document == "->")
+
+    let digits = Session(lexicon: lexicon, mode: .korean)
+    #expect(digits.shiftDigitsAsSymbols == false)
+    #expect(digits.type("MN<>") == "1023")
+    #expect(digits.type("UIOJKLMN") == "102378945610")
+}
+
 @Test func padDigitsStayDigitsInKoreanMode() {
     let pad = ["M": "1", "N": "0", "U": "7", "I": "8", "O": "9", "J": "4", "K": "5", "L": "6", "<": "2", ">": "3"]
     var failures: [String] = []

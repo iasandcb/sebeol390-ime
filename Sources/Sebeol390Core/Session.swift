@@ -86,6 +86,8 @@ public final class Session {
     public var autoSwitch: Bool
     /// When false, a finished word stays as typed. Retype logging still runs.
     public var correctsTypos = true
+    /// When true, Shift on a 390 digit key inserts the QWERTY character (`>` not `3`).
+    public var shiftDigitsAsSymbols = false
     public private(set) var mode: Language
     /// Hangul still open. Empty while the current token is English, digits, or finished.
     public private(set) var preedit = ""
@@ -128,6 +130,10 @@ public final class Session {
     }
 
     public func input(_ atom: KeyAtom) -> SessionUpdate {
+        let atom = shiftedDigit(atom)
+        if let arrow = arrowInsteadOfDigit(atom) {
+            return arrow
+        }
         if atom.isNeutralBreaker && !continuesAsCode(atom) {
             return finishWord(appending: atom.english)
         }
@@ -178,9 +184,33 @@ public final class Session {
         return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: false)
     }
 
-    /// Shift+Space / Caps Lock. Immediately after an automatic conversion or
-    /// typo correction this restores what was typed and holds it. Otherwise
-    /// it flips the reading of the current word, or the mode for the next word.
+    /// A 390 digit key typed with Shift. With the symbol switch on, keep the
+    /// QWERTY character (`M` stays `M`, `>` stays `>`).
+    private func shiftedDigit(_ atom: KeyAtom) -> KeyAtom {
+        guard shiftDigitsAsSymbols, isPadDigit(atom) else { return atom }
+        return KeyAtom(english: atom.english, korean: .character(atom.english))
+    }
+
+    /// `-` or `=` then Shift+. is `->` or `=>`, not `-3` or `=3`.
+    /// Shift+Space puts the digit back.
+    private func arrowInsteadOfDigit(_ atom: KeyAtom) -> SessionUpdate? {
+        guard atom.english == ">", case .character("3") = atom.korean else { return nil }
+        guard preedit.isEmpty, let previous = document.last, previous == "-" || previous == "=" else { return nil }
+        finished += plain
+        clearToken()
+        finished.append(">")
+        contextAtWordStart = contextLanguage
+        pendingUndo = Undo(
+            keys: [atom],
+            segments: [Segment(start: 0, end: 1, lang: .korean)],
+            committedSuffix: ">"
+        )
+        return make(.insert(">"), marked: "", didAutoConvert: true)
+    }
+
+    /// Shift+Space / Caps Lock. Immediately after an automatic conversion,
+    /// typo correction, or `->` this restores what was typed and holds it.
+    /// Otherwise it flips the reading of the current word, or the mode for the next word.
     public func toggle() -> SessionUpdate {
         if let undo = pendingUndo {
             pendingUndo = nil
