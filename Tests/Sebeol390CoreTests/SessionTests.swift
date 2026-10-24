@@ -324,6 +324,71 @@ private let lexicon: Lexicon = {
     #expect(paper.marked.isEmpty)
 }
 
+@Test func backspaceRetypeDoesNotDuplicate() {
+    let bigyo = SebeolKeys.keys(for: "비교")!
+    let spaceWord = SebeolKeys.keys(for: "백스페이스")!
+    fieldEqualsDocument(bigyo, backspaces: 1, retype: String(bigyo.suffix(1)), expect: "비교")
+    fieldEqualsDocument(bigyo, backspaces: 2, retype: String(bigyo.suffix(2)), expect: "비교")
+    fieldEqualsDocument(bigyo + " ", backspaces: 1, retype: " ", expect: "비교 ")
+    fieldEqualsDocument(bigyo + " ", backspaces: 2, retype: String(bigyo.suffix(2)) + " ", expect: "비교 ")
+    fieldEqualsDocument(spaceWord, backspaces: 2, retype: String(spaceWord.suffix(2)), expect: "백스페이스")
+    fieldEqualsDocument(spaceWord + " ", backspaces: 2, retype: String(spaceWord.suffix(2)) + " ", expect: "백스페이스 ")
+    fieldEqualsDocument("hello", backspaces: 3, retype: "llo", expect: "hello")
+    fieldEqualsDocument(bigyo, backspaces: bigyo.count, retype: "hello", expect: "hello")
+
+    let typo = (SebeolKeys.keys(for: "한글") ?? "").replacing("g", with: "b")
+    fieldEqualsDocument(typo + " ", backspaces: 0, retype: "", expect: "한글 ")
+    let undone = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    drive(&paper, undone, typo + " ")
+    #expect(paper.text == "한글 ")
+    let restored = undone.toggle()
+    if restored.field == .none {
+        paper.deleteOne()
+    } else {
+        paper.apply(restored.field)
+    }
+    #expect(paper.text == "한굴")
+    #expect(paper.text == undone.document)
+    drive(&paper, undone, " ")
+    #expect(paper.text == "한굴 ")
+    #expect(paper.text == undone.document)
+}
+
+private func fieldEqualsDocument(_ keys: String, backspaces: Int, retype: String, expect: String) {
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    var trace: [String] = []
+    func note(_ step: String) {
+        trace.append("\(step) paper=\(paper.text) doc=\(session.document) mark=\(paper.marked) pre=\(session.preedit)")
+    }
+    for character in keys {
+        drive(&paper, session, String(character))
+        note("\(character)")
+    }
+    for _ in 0..<backspaces {
+        let update = session.backspace()
+        if update.field == .none {
+            paper.deleteOne()
+        } else {
+            paper.apply(update.field)
+        }
+        note("bs \(update.field)")
+    }
+    drive(&paper, session, retype)
+    note("retype")
+    let report = trace.suffix(8).joined(separator: "\n")
+    #expect(paper.text == session.document, "\(report)")
+    #expect(paper.marked == session.preedit, "\(report)")
+    #expect(paper.text == expect, "\(report)")
+}
+
+private func drive(_ paper: inout Paper, _ session: Session, _ keys: String) {
+    for character in keys {
+        paper.apply(session.input(character).field)
+    }
+}
+
 @Test func backspaceOfCommittedEnglishPassesThrough() {
     let session = Session(lexicon: lexicon, mode: .korean)
     var paper = Paper()

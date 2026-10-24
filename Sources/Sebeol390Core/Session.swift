@@ -162,7 +162,14 @@ public final class Session {
                 rejected = Rejection(keys: keys, text: text)
             }
         }
-        guard !keys.isEmpty else { return make(.none, marked: preedit, didAutoConvert: false) }
+        guard !keys.isEmpty else {
+            // The client deletes one committed character. Drop it here too, or the
+            // next word boundary inserts the stale prefix again.
+            if !finished.isEmpty {
+                finished.removeLast()
+            }
+            return make(.none, marked: "", didAutoConvert: false)
+        }
         let before = document
         keys.removeLast()
         if keys.isEmpty {
@@ -174,12 +181,13 @@ public final class Session {
         }
         let (nextPlain, nextMarked) = clientSplit()
         let after = finished + nextPlain + nextMarked
-        // The letter is already in the field. Let the app delete it when that
-        // is exactly what the new reading is, so autocomplete sees a real delete.
-        if preedit.isEmpty, before.hasPrefix(after), utf16Length(before) == utf16Length(after) + 1 {
+        // A committed letter the client can delete itself. Only when nothing
+        // has to become a composition again — a hidden mark would be inserted
+        // on the next key beside the characters still on screen.
+        if preedit.isEmpty, nextMarked.isEmpty, before.hasPrefix(after), utf16Length(before) == utf16Length(after) + 1 {
             plain = nextPlain
-            preedit = nextMarked
-            return make(.none, marked: preedit, didAutoConvert: false)
+            preedit = ""
+            return make(.none, marked: "", didAutoConvert: false)
         }
         return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: false)
     }
@@ -1057,11 +1065,10 @@ public final class Session {
         return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: didAutoConvert)
     }
 
-    /// English, digits, and symbols are inserted once. The trailing Hangul,
-    /// including every composing segment of the current syllable, stays one
-    /// marked range so the next key replaces that range instead of inserting
-    /// the same characters again. Digits that share a segment with a syllable
-    /// ("1개") stay inserted; only the syllable is marked.
+    /// English, digits, and symbols are inserted once. Completed Hangul
+    /// syllables are inserted too. Only the syllable still being composed is
+    /// marked, so a later edit replaces that syllable and does not append the
+    /// whole word after the syllables the field already kept.
     private func clientSplit() -> (plain: String, marked: String) {
         guard !segments.isEmpty else { return ("", "") }
         var splitAt = segments.count
@@ -1076,7 +1083,8 @@ public final class Session {
         let head = render(Array(segments[..<splitAt]))
         let tail = Array(segments[splitAt...])
         guard let first = tail.first else { return (head, "") }
-        let peeled = peelDigitsAndSymbols(first)
+        let composition = Composer.compose(keys[first.start..<first.end])
+        let peeled = splitCommittedSyllables(composition)
         var marked = peeled.open
         if tail.count > 1 {
             marked += render(Array(tail.dropFirst()))
@@ -1093,24 +1101,29 @@ public final class Session {
         return (stable, marked)
     }
 
-    /// A 390 digit or symbol at the front of a Hangul segment was already
-    /// inserted. Putting it inside the new marked text types it a second time.
-    private func peelDigitsAndSymbols(_ segment: Segment) -> (stable: String, open: String) {
-        let composition = Composer.compose(keys[segment.start..<segment.end])
+    /// Digits and symbols, and every syllable before the one still open, are
+    /// already in the field. The mark is that last syllable, or the bare jamo
+    /// that starts the next one. A run of only bare jamo stays marked together.
+    private func splitCommittedSyllables(_ composition: Composition) -> (stable: String, open: String) {
         let chars = Array(composition.text)
-        guard chars.count == composition.pieces.count else {
+        guard chars.count == composition.pieces.count, !chars.isEmpty else {
             return ("", composition.text)
         }
-        var index = 0
-        for piece in composition.pieces {
-            switch piece {
-            case .digit, .symbol:
-                index += 1
-            case .syllable, .bareChoseong, .bareJungseong, .bareJongseong:
-                return (String(chars[..<index]), String(chars[index...]))
+        let syllables = composition.pieces.indices.filter { composition.pieces[$0] == .syllable }
+        guard let lastSyllable = syllables.last else {
+            var index = 0
+            while index < composition.pieces.count {
+                switch composition.pieces[index] {
+                case .digit, .symbol:
+                    index += 1
+                default:
+                    return (String(chars[..<index]), String(chars[index...]))
+                }
             }
+            return (composition.text, "")
         }
-        return (composition.text, "")
+        let openAt = composition.pieces.last == .syllable ? lastSyllable : lastSyllable + 1
+        return (String(chars[..<openAt]), String(chars[openAt...]))
     }
 
     private func segmentComposes(_ segment: Segment) -> Bool {
