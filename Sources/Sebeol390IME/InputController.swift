@@ -5,7 +5,12 @@ import Sebeol390Core
 
 @objc(SebeolInputController)
 final class SebeolInputController: IMKInputController {
-    private let session = Session(lexicon: SharedLexicon.lexicon, autoSwitch: true, mode: .korean)
+    private let session = Session(
+        lexicon: SharedLexicon.lexicon,
+        autoSwitch: true,
+        mode: .korean,
+        typos: SharedTypoLog.store
+    )
     private var sawCapsLockDown = false
 
     override func recognizedEvents(_ sender: Any!) -> Int {
@@ -38,7 +43,8 @@ final class SebeolInputController: IMKInputController {
             return true
         }
         if Keymap.isNavigation(event.keyCode) {
-            apply(session.commitDisplayed(), client: client)
+            let endingRun = event.keyCode == Keymap.return
+            apply(session.commitDisplayed(endingRun: endingRun), client: client)
             return false
         }
 
@@ -224,6 +230,10 @@ final class SebeolInputController: IMKInputController {
         }
         return string
     }
+}
+
+enum SharedTypoLog {
+    static let store = TypoLog()
 }
 
 enum SharedLexicon {

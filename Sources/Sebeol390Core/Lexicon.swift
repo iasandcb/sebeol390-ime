@@ -5,6 +5,8 @@ public final class Lexicon: @unchecked Sendable {
     private let korean: Set<String>
     private let abbreviations: Set<String>
     private let techStems: Set<String>
+    private let indexLock = NSLock()
+    private var englishByLength: [Int: [String]]?
 
     public init(english: [String], korean: [String], abbreviations: [String] = [], techStems: [String] = []) {
         self.english = Array(Set(english.map { $0.lowercased() })).sorted()
@@ -27,6 +29,33 @@ public final class Lexicon: @unchecked Sendable {
 
     public func isKoreanWord(_ word: String) -> Bool {
         korean.contains(word.precomposedStringWithCanonicalMapping)
+    }
+
+    public var koreanWordCount: Int { korean.count }
+
+    public func koreanWords() -> [String] {
+        Array(korean)
+    }
+
+    /// English dictionary entries whose length is inside `range`. The list is
+    /// built once; callers use it at a word boundary, not on every key.
+    public func englishWords(length: ClosedRange<Int>) -> [String] {
+        indexLock.lock()
+        defer { indexLock.unlock() }
+        if englishByLength == nil {
+            var buckets: [Int: [String]] = [:]
+            for word in english {
+                buckets[word.count, default: []].append(word)
+            }
+            englishByLength = buckets
+        }
+        var result: [String] = []
+        for count in length {
+            if let bucket = englishByLength?[count] {
+                result.append(contentsOf: bucket)
+            }
+        }
+        return result
     }
 
     public func isAbbreviation(_ text: String) -> Bool {

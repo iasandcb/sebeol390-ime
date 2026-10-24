@@ -33,12 +33,29 @@ public enum Composer {
         return Composition(text: engine.text, pieces: engine.pieces)
     }
 
+    /// Merged jamo in composition order. Nil when a key is not jamo, so a
+    /// digit or symbol is not compared as Hangul. ㄲ typed as ㄱㄱ is one unit.
+    public static func jamoSequence<S: Sequence>(_ atoms: S) -> [Jamo]? where S.Element == KeyAtom {
+        var engine = Engine()
+        for atom in atoms {
+            switch atom.korean {
+            case .jamo(let jamo):
+                engine.push(jamo)
+            case .character:
+                return nil
+            }
+        }
+        engine.flush()
+        return engine.units
+    }
+
     private struct Engine {
         var cho: [Jamo] = []
         var jung: [Jamo] = []
         var jong: [Jamo] = []
         var text = ""
         var pieces: [CompositionPiece] = []
+        var units: [Jamo] = []
 
         mutating func push(_ jamo: Jamo) {
             switch jamo.kind {
@@ -99,6 +116,9 @@ public enum Composer {
             let rendered = renderOpen()
             text += rendered.text
             pieces += rendered.pieces
+            if let choJ = combined(cho) { units.append(choJ) }
+            if let jungJ = combined(jung) { units.append(jungJ) }
+            if let jongJ = combined(jong) { units.append(jongJ) }
             cho = []
             jung = []
             jong = []

@@ -898,6 +898,165 @@ private func sticksAsKorean(_ text: String) -> Bool {
     assertTypes("TV", "TV")
 }
 
+@Test func englishContextKeepsFunctionWords() {
+    assertTypes("one of the", "one of the")
+    assertTypes("kind of", "kind of")
+    assertTypes("out of the", "out of the")
+    assertTypes("part of", "part of")
+    assertTypes("one to", "one to")
+    assertTypes("one in", "one in")
+    assertTypes("one is", "one is")
+    let hangul = SebeolKeys.keys(for: "한글")!
+    assertTypes("one " + hangul, "one 한글")
+
+    let han = SebeolKeys.keys(for: "한")!
+    assertTypes(han + " of", "한 차")
+    assertTypes(han + " the", "한 the")
+    assertTypes("of", "차")
+    assertTypes("one. of", "one. 차")
+    assertTypes("one\nof", "one\n차")
+
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    for character in "one of " {
+        paper.apply(session.input(character).field)
+    }
+    #expect(paper.text == "one of ")
+    paper.apply(session.toggle().field)
+    #expect(paper.text == "one 차")
+    #expect(session.document == "one 차")
+    paper.apply(session.input(" ").field)
+    #expect(paper.text == "one 차 ")
+    #expect(session.document == "one 차 ")
+
+    _ = session.commitDisplayed(endingRun: true)
+    for character in "of" {
+        paper.apply(session.input(character).field)
+    }
+    #expect(session.document.hasSuffix("차"))
+}
+
+@Test func shiftSpaceUndoesTypoCorrection() {
+    let typed = (SebeolKeys.keys(for: "한글") ?? "").replacing("g", with: "b")
+    #expect(typed.contains("b"))
+    let session = Session(lexicon: lexicon, mode: .korean)
+    var paper = Paper()
+    for character in typed + " " {
+        paper.apply(session.input(character).field)
+    }
+    #expect(paper.text == "한글 ")
+    #expect(session.document == "한글 ")
+    paper.apply(session.toggle().field)
+    #expect(session.document == "한굴")
+    #expect(paper.text == "한굴")
+    paper.apply(session.input(" ").field)
+    #expect(session.document == "한굴 ")
+    #expect(paper.text == "한굴 ")
+
+    let period = Session(lexicon: lexicon, mode: .korean)
+    #expect(period.type(typed + ".") == "한글.")
+    _ = period.toggle()
+    #expect(period.document == "한굴")
+    #expect(period.type(".") == "한굴.")
+}
+
+@Test func realisticTyposAreCorrectedOnce() {
+    func committed(_ keys: String) -> String {
+        Session(lexicon: lexicon, mode: .korean).type(keys + " ")
+    }
+    let saram = SebeolKeys.keys(for: "싸람")!
+    #expect(committed(saram) == "사람 ")
+    #expect(committed(SebeolKeys.keys(for: "한글")!) == "한글 ")
+    #expect(committed(SebeolKeys.keys(for: "했어")!) == "했어 ")
+    #expect(committed(SebeolKeys.keys(for: "갔어")!) == "갔어 ")
+    #expect(committed("mm") == "ㅎㅎ ")
+
+    let english = Session(lexicon: lexicon, autoSwitch: false, mode: .english)
+    #expect(english.type("hellp ") == "hello ")
+    _ = english.toggle()
+    #expect(english.document == "hellp")
+    #expect(english.type(" ") == "hellp ")
+}
+
+@Test func typoLogRemembersARetypeAndAOneSyllablePair() {
+    let memory = MemoryTypos()
+    let session = Session(lexicon: lexicon, mode: .korean, typos: memory)
+    let typo = (SebeolKeys.keys(for: "한글") ?? "").replacing("g", with: "b")
+    let fixed = SebeolKeys.keys(for: "한글")!
+    _ = session.type(typo)
+    _ = session.backspace()
+    _ = session.backspace()
+    _ = session.type("gw ")
+    #expect(memory.rows.count == 1)
+    #expect(memory.rows[0].wrong == "한굴")
+    #expect(memory.rows[0].final == "한글")
+    #expect(memory.rows[0].wrongKeys == typo)
+    #expect(memory.rows[0].finalKeys == fixed)
+
+    let seeded = MemoryTypos()
+    seeded.rows.append((wrong: "굴", wrongKeys: "x", final: "가", finalKeys: "kf"))
+    let again = Session(lexicon: lexicon, mode: .korean, typos: seeded)
+    let gul = SebeolKeys.keys(for: "굴")!
+    #expect(again.type(gul + " ") == "가 ")
+    seeded.rows.append((wrong: "굴", wrongKeys: "x", final: "나", finalKeys: "hf"))
+    let ambiguous = Session(lexicon: lexicon, mode: .korean, typos: seeded)
+    #expect(ambiguous.type(gul + " ") == "굴 ")
+
+    let dropped = MemoryTypos()
+    let secure = Session(lexicon: lexicon, mode: .korean, typos: dropped)
+    _ = secure.type(typo)
+    _ = secure.backspace()
+    _ = secure.discard()
+    #expect(dropped.rows.isEmpty)
+}
+
+@Test func dictionaryWordsAreNotAutoCorrected() {
+    let particles = KoreanEndings.longestFirst
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Resources/korean-words.txt")
+    let words = (try! String(contentsOf: root, encoding: .utf8))
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") && $0.allSatisfy(isModernSyllable) }
+    var failures: [String] = []
+    for word in words {
+        guard let keys = SebeolKeys.keys(for: word) else { continue }
+        let session = Session(lexicon: lexicon, mode: .korean)
+        if session.type(keys + " ") != word + " " {
+            failures.append("\(word) → \(session.document)")
+        }
+        if failures.count > 12 { break }
+        for particle in particles {
+            guard let tail = SebeolKeys.keys(for: particle) else { continue }
+            let combined = Session(lexicon: lexicon, mode: .korean)
+            let expected = word + particle + " "
+            if combined.type(keys + tail + " ") != expected {
+                failures.append("\(word)+\(particle) → \(combined.document)")
+            }
+            if failures.count > 12 { break }
+        }
+    }
+    let report = failures.prefix(12).joined(separator: "\n")
+    #expect(failures.isEmpty, "\(failures.count) failures\n\(report)")
+}
+
+final class MemoryTypos: TypoMemory {
+    var rows: [(wrong: String, wrongKeys: String, final: String, finalKeys: String)] = []
+
+    func record(wrong: String, wrongKeys: String, final: String, finalKeys: String) {
+        rows.append((wrong, wrongKeys, final, finalKeys))
+    }
+
+    func uniqueFinal(for wrong: String) -> String? {
+        let matches = rows.filter { $0.wrong == wrong }.map(\.final)
+        let unique = Set(matches)
+        return unique.count == 1 ? matches[0] : nil
+    }
+}
+
 private func assertTypes(_ keys: String, _ expected: String, mode: Language = .korean) {
     let session = Session(lexicon: lexicon, mode: mode)
     var trace: [String] = []

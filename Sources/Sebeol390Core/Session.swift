@@ -103,12 +103,22 @@ public final class Session {
     private var finished = ""
     /// Open-token prefix already inserted. The marked syllable, if any, follows it.
     private var plain = ""
+    private let typos: (any TypoMemory)?
+    /// First backspace in this word, before the user retypes.
+    private var rejected: Rejection?
+    /// Language of the previous word in this run. Nil after a sentence or newline.
+    private var contextLanguage: Language?
+    /// `contextLanguage` as it was when the open word started. Undo puts it back.
+    private var contextAtWordStart: Language?
+    /// Korean reading to restore when a function word was kept in English.
+    private var preferredUndo: [Segment]?
 
-    public init(lexicon: Lexicon, autoSwitch: Bool = true, mode: Language = .korean) {
+    public init(lexicon: Lexicon, autoSwitch: Bool = true, mode: Language = .korean, typos: (any TypoMemory)? = nil) {
         self.lexicon = lexicon
         self.autoSwitch = autoSwitch
         self.mode = mode
         self.wordMode = mode
+        self.typos = typos
     }
 
     public func input(_ english: Character) -> SessionUpdate {
@@ -120,11 +130,17 @@ public final class Session {
             return finishWord(appending: atom.english)
         }
         pendingUndo = nil
-        if keys.isEmpty { wordMode = mode }
+        if keys.isEmpty {
+            wordMode = mode
+            contextAtWordStart = contextLanguage
+        }
         let previous = segments
         keys.append(atom)
         let converted = recompute(wordFinal: false, previous: previous)
-        if converted, let extended = extend(previous, to: keys.count) {
+        if let undoSegments = preferredUndo {
+            preferredUndo = nil
+            pendingUndo = Undo(keys: keys, segments: undoSegments, committedSuffix: nil)
+        } else if converted, let extended = extend(previous, to: keys.count) {
             pendingUndo = Undo(keys: keys, segments: extended, committedSuffix: nil)
         }
         return syncClient(didAutoConvert: converted)
@@ -132,12 +148,19 @@ public final class Session {
 
     public func backspace() -> SessionUpdate {
         pendingUndo = nil
+        if rejected == nil, !keys.isEmpty {
+            let text = render(segments)
+            if !text.isEmpty {
+                rejected = Rejection(keys: keys, text: text)
+            }
+        }
         guard !keys.isEmpty else { return make(.none, marked: preedit, didAutoConvert: false) }
         let before = document
         keys.removeLast()
         if keys.isEmpty {
             segments = []
             locked = nil
+            rejected = nil
         } else {
             _ = recompute(wordFinal: false, previous: nil)
         }
@@ -153,9 +176,9 @@ public final class Session {
         return emit(toPlain: nextPlain, toMarked: nextMarked, didAutoConvert: false)
     }
 
-    /// Caps Lock / Shift+Space. Immediately after an automatic conversion this
-    /// restores the previous reading and holds it. Otherwise it flips the
-    /// reading of the current word, or the mode for the next word.
+    /// Shift+Space / Caps Lock. Immediately after an automatic conversion or
+    /// typo correction this restores what was typed and holds it. Otherwise
+    /// it flips the reading of the current word, or the mode for the next word.
     public func toggle() -> SessionUpdate {
         if let undo = pendingUndo {
             pendingUndo = nil
@@ -163,6 +186,7 @@ public final class Session {
                 if finished.hasSuffix(suffix) {
                     finished.removeLast(suffix.count)
                 }
+                contextLanguage = contextAtWordStart
                 restore(undo)
                 let (nextPlain, nextMarked) = clientSplit()
                 let field = replaceFinishedSuffix(suffix, withPlain: nextPlain, mark: nextMarked)
@@ -190,11 +214,16 @@ public final class Session {
 
     /// Hand the caret back to the app without rewriting characters. English
     /// is already inserted. Hangul, if any, is unmarked in place.
-    public func commitDisplayed() -> SessionUpdate {
+    public func commitDisplayed(endingRun: Bool = false) -> SessionUpdate {
+        let hadToken = !keys.isEmpty
+        noteRetype(final: render(segments))
         pendingUndo = nil
         let field: FieldEdit = preedit.isEmpty ? .none : .unmark(preedit)
         finished += plain + preedit
         clearToken()
+        if endingRun || hadToken {
+            contextLanguage = nil
+        }
         return make(field, marked: "", didAutoConvert: false)
     }
 
@@ -207,6 +236,8 @@ public final class Session {
     }
 
     public func discard() -> SessionUpdate {
+        rejected = nil
+        contextLanguage = nil
         let field: FieldEdit = preedit.isEmpty ? .none : .mark("")
         finished += plain
         clearToken()
@@ -223,18 +254,60 @@ public final class Session {
         let previous = segments
         let before = render(segments)
         _ = recompute(wordFinal: true, previous: previous.isEmpty ? nil : previous)
-        let word = render(segments)
+        let composedSegments = segments
+        let composed = render(segments)
+        noteRetype(final: composed)
+        var word = composed
+        if locked == nil, let fixed = corrected(composed) {
+            word = fixed
+        }
         let suffix = word + String(breaker)
-        if word != before && !keys.isEmpty {
+        if word != composed, !keys.isEmpty {
+            pendingUndo = Undo(keys: keys, segments: composedSegments, committedSuffix: suffix)
+        } else if composed != before, !keys.isEmpty {
             pendingUndo = Undo(keys: keys, segments: previous, committedSuffix: suffix)
+        } else if let undo = pendingUndo, undo.committedSuffix == nil, undo.keys.count == keys.count, !keys.isEmpty {
+            pendingUndo = Undo(keys: undo.keys, segments: undo.segments, committedSuffix: suffix)
         } else {
             pendingUndo = nil
         }
         let field = finishField(word: word, breaker: breaker)
         finished += suffix
-        let converted = word != before && !before.isEmpty
+        let sentence = isSentenceBoundary(breaker) || ".?!".contains(composed.last ?? " ")
+        if sentence {
+            contextLanguage = nil
+        } else if !keys.isEmpty, let language = composedSegments.last?.lang {
+            contextLanguage = language
+        }
+        let converted = composed != before && !before.isEmpty
         clearToken()
         return make(field, marked: "", didAutoConvert: converted)
+    }
+
+    /// A finished token whose spelling was not what the keys composed.
+    private func corrected(_ composed: String) -> String? {
+        guard segments.count == 1, let only = segments.first, only.start == 0, only.end == keys.count else { return nil }
+        return TypoCorrector.correction(
+            composed: composed,
+            keys: keys,
+            language: only.lang,
+            lexicon: lexicon,
+            memory: typos
+        )
+    }
+
+    private func noteRetype(final: String) {
+        let snapshot = rejected
+        rejected = nil
+        guard let snapshot else { return }
+        let wrongKeys = String(snapshot.keys.map(\.english))
+        let finalKeys = String(keys.map(\.english))
+        guard TypoLogPolicy.shouldStore(wrong: snapshot.text, final: final, wrongKeys: wrongKeys, finalKeys: finalKeys) else { return }
+        typos?.record(wrong: snapshot.text, wrongKeys: wrongKeys, final: final, finalKeys: finalKeys)
+    }
+
+    private func isSentenceBoundary(_ breaker: Character) -> Bool {
+        ".\n?!".contains(breaker)
     }
 
     private func finishField(word: String, breaker: Character) -> FieldEdit {
@@ -263,6 +336,7 @@ public final class Session {
         locked = nil
         plain = ""
         preedit = ""
+        rejected = nil
     }
 
     private func restore(_ undo: Undo) {
@@ -285,6 +359,7 @@ public final class Session {
 
     @discardableResult
     private func recompute(wordFinal: Bool, previous: [Segment]?) -> Bool {
+        preferredUndo = nil
         if let locked {
             segments = keys.isEmpty ? [] : [Segment(start: 0, end: keys.count, lang: locked)]
             mode = locked
@@ -327,6 +402,25 @@ public final class Session {
             }
             segments = parts
             mode = .korean
+            return changed
+        }
+
+        // "of" is the syllable 차. After an English word the short function
+        // word stays English. Hangul stickiness still wins for every other buffer.
+        if prefersContextualEnglish() {
+            let english = [Segment(start: 0, end: keys.count, lang: .english)]
+            let korean = [Segment(start: 0, end: keys.count, lang: .korean)]
+            // The key before this one may already be Latin because the mode
+            // followed the English word. Undo still has to bring back 차.
+            if render(english) != render(korean) {
+                preferredUndo = korean
+            }
+            var changed = preferredUndo != nil
+            if let previous, let extended = extend(previous, to: keys.count) {
+                changed = changed || render(english) != render(extended)
+            }
+            segments = english
+            mode = .english
             return changed
         }
 
@@ -702,10 +796,23 @@ public final class Session {
     }
 
     /// Particles and short endings that attach to a word with no space.
-    private static let particles: Set<String> = [
-        "는", "은", "이", "가", "를", "을", "에", "에서", "로", "으로",
-        "와", "과", "도", "만", "의", "하고", "했", "해", "하는",
+    private static let particles = KoreanEndings.set
+
+    /// Short words that are a real English word and also a Hangul reading.
+    /// `of` is 차. Only the word before them, in the same run, picks a side.
+    private static let englishContextWords: Set<String> = [
+        "of", "to", "in", "is", "it", "on", "at", "as", "or", "if", "an",
+        "be", "do", "go", "no", "so", "up", "we", "me", "my", "the",
     ]
+
+    private func prefersContextualEnglish() -> Bool {
+        guard contextLanguage == .english else { return false }
+        guard (2...3).contains(keys.count) else { return false }
+        let spelling = englishText(0..<keys.count)
+        guard spelling.allSatisfy({ $0.isLetter && $0.isLowercase }) else { return false }
+        guard Self.englishContextWords.contains(spelling), lexicon.isEnglishWord(spelling) else { return false }
+        return true
+    }
 
     /// Short heads that may keep a Hangul particle (`ktx는`, `api를`).
     /// A 3-letter Webster hit such as "jfk" is not enough: it steals the
@@ -1086,6 +1193,11 @@ private struct Undo {
     var keys: [KeyAtom]
     var segments: [Segment]
     var committedSuffix: String?
+}
+
+private struct Rejection {
+    var keys: [KeyAtom]
+    var text: String
 }
 
 private enum Shape {

@@ -109,4 +109,25 @@ public enum Hangul {
         }
         return table
     }()
+
+    /// True when one jamo is a single merge step away from the other
+    /// (ㅗ and ㅘ, ㄱ and ㄲ). Used by typo distance, not by composition.
+    public static func differsByOneComponent(_ first: Jamo, _ second: Jamo) -> Bool {
+        guard first.kind == second.kind, first.scalar != second.scalar else { return false }
+        let key = (UInt64(first.scalar) << 32) | UInt64(second.scalar)
+        return componentPairs.contains(key)
+    }
+
+    private static let componentPairs: Set<UInt64> = {
+        var pairs: Set<UInt64> = []
+        for (key, value) in merges {
+            let left = UInt32(key >> 32)
+            let right = UInt32(key & 0xFFFF_FFFF)
+            for part in [left, right] {
+                pairs.insert((UInt64(part) << 32) | UInt64(value))
+                pairs.insert((UInt64(value) << 32) | UInt64(part))
+            }
+        }
+        return pairs
+    }()
 }
